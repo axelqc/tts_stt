@@ -112,9 +112,10 @@ async def media_stream(ws: WebSocket):
 
     stream_sid = None
     audio_buffer = b""
-    # Buffer más grande: 3 segundos para mejor detección
-    BUFFER_SIZE = 24000  # 3 segundos a 8kHz μ-law
+    # Buffer de 2 segundos
+    BUFFER_SIZE = 16000  # 2 segundos a 8kHz μ-law
     is_speaking = False
+    chunks_received = 0
 
     try:
         while True:
@@ -139,12 +140,23 @@ async def media_stream(ws: WebSocket):
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
                 
+                chunks_received += 1
+                
                 # Debug: mostrar primeros bytes
-                if len(audio_buffer) == 0:
+                if chunks_received == 1:
                     print(f"🎵 Primer chunk recibido: {len(audio_bytes)} bytes")
+                    print(f"   Primeros 10 bytes (hex): {audio_bytes[:10].hex()}")
+                
+                # Verificar que no sea silencio total (todos ceros)
+                if audio_bytes == b'\xff' * len(audio_bytes) or audio_bytes == b'\x00' * len(audio_bytes):
+                    print(f"⚠️  Chunk #{chunks_received} es silencio total, ignorando...")
+                    continue
                 
                 # Acumular audio
                 audio_buffer += audio_bytes
+                
+                if chunks_received % 50 == 0:  # Log cada 50 chunks
+                    print(f"📦 Acumulados {chunks_received} chunks, buffer: {len(audio_buffer)} bytes")
                 
                 # Procesar cuando tengamos suficiente audio (2 segundos)
                 if len(audio_buffer) < BUFFER_SIZE:
@@ -161,14 +173,15 @@ async def media_stream(ws: WebSocket):
                     
                     print(f"📊 Audio convertido: {len(pcm_audio)} bytes PCM")
                     
-                    # IBM STT con parámetros optimizados
+                    # Guardar audio para debug (opcional - comentar en producción)
+                    # with open(f"/tmp/audio_debug_{stream_sid}.raw", "wb") as f:
+                    #     f.write(pcm_audio)
+                    
+                    # Intentar primero sin especificar modelo (usar default)
+                    print("🔄 Intentando con modelo por defecto...")
                     result = stt.recognize(
                         audio=pcm_audio,
-                        content_type="audio/l16; rate=16000",
-                        model="es-ES_BroadbandModel",  # Modelo en español explícito
-                        smart_formatting=True,
-                        end_of_phrase_silence_time=0.5,
-                        background_audio_suppression=0.5
+                        content_type="audio/l16; rate=16000"
                     ).get_result()
                     
                     print(f"🔍 Resultado STT completo: {json.dumps(result, indent=2)}")
