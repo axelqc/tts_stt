@@ -8,6 +8,7 @@ import audioop
 import io
 import wave
 import asyncio
+import time
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
@@ -130,6 +131,10 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice")
         # Convertir a μ-law para Twilio
         mulaw_audio = convert_wav_to_mulaw_8k(audio_reply)
         
+        # Calcular duración aproximada del audio
+        duration_seconds = len(mulaw_audio) / 8000  # 8000 bytes por segundo
+        print(f"⏱️  Duración estimada del audio: {duration_seconds:.1f} segundos")
+        
         # Enviar en chunks de 20ms (160 bytes a 8kHz)
         chunk_size = 160
         chunks_sent = 0
@@ -146,9 +151,9 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice")
         
         print(f"✅ Audio enviado completamente ({chunks_sent} chunks)")
         
-        # Pequeño delay después de enviar para que termine de reproducirse
-        import asyncio
-        await asyncio.sleep(0.5)
+        # Esperar a que termine de reproducirse + 1 segundo extra de buffer
+        await asyncio.sleep(duration_seconds + 1.0)
+        print("🎧 Audio terminado de reproducir, listo para escuchar")
         
     except Exception as e:
         print(f"❌ Error enviando audio: {e}")
@@ -157,8 +162,10 @@ async def send_greeting(ws, stream_sid):
     """
     Envía saludo inicial
     """
-    greeting = "Hola, soy tu asistente inmobiliario. ¿En qué puedo ayudarte hoy?"
+    greeting = "Hola, ¿en qué puedo ayudarte?"  # Saludo más corto
+    print("🤖 Enviando saludo inicial...")
     await send_audio_to_twilio(ws, stream_sid, greeting)
+    print("👂 Saludo completado, ahora escuchando...")
 
 @app.get("/")
 async def root():
@@ -177,10 +184,11 @@ async def media_stream(ws: WebSocket):
 
     stream_sid = None
     audio_buffer = b""
-    BUFFER_SIZE = 24000  # 3 segundos a 8kHz μ-law para mejor reconocimiento
+    BUFFER_SIZE = 40000  # 5 segundos a 8kHz μ-law - más tiempo para hablar
     is_speaking = False
     chunks_received = 0
-    has_greeted = False  # Flag para saludo inicial
+    has_greeted = False
+    last_response_time = 0  # Para evitar respuestas repetidas
 
     try:
         while True:
@@ -204,13 +212,16 @@ async def media_stream(ws: WebSocket):
                 # Enviar saludo inicial solo una vez
                 if not has_greeted:
                     has_greeted = True
-                    is_speaking = True  # Marcar como hablando durante saludo
+                    is_speaking = True  # Bloquear escucha durante saludo
                     await send_greeting(ws, stream_sid)
-                    is_speaking = False  # Listo para escuchar
+                    is_speaking = False  # Ahora sí, listo para escuchar
+                    audio_buffer = b""  # Limpiar buffer
+                    chunks_received = 0
 
             elif data["event"] == "media":
-                # No procesar audio mientras el bot está hablando
+                # CRÍTICO: No procesar audio mientras el bot está hablando
                 if is_speaking:
+                    # Descartar este chunk completamente
                     continue
                     
                 audio_b64 = data["media"]["payload"]
@@ -225,10 +236,9 @@ async def media_stream(ws: WebSocket):
                 
                 # Verificar que no sea silencio total (todos ceros)
                 if audio_bytes == b'\xff' * len(audio_bytes) or audio_bytes == b'\x00' * len(audio_bytes):
-                    print(f"⚠️  Chunk #{chunks_received} es silencio total, ignorando...")
                     continue
                 
-                # Acumular audio
+                # Acumular audio SOLO si no está hablando el bot
                 audio_buffer += audio_bytes
                 
                 if chunks_received % 50 == 0:  # Log cada 50 chunks
@@ -236,6 +246,10 @@ async def media_stream(ws: WebSocket):
                 
                 # Procesar cuando tengamos suficiente audio (2 segundos)
                 if len(audio_buffer) < BUFFER_SIZE:
+                    if chunks_received % 100 == 0 and chunks_received > 0:
+                        percentage = (len(audio_buffer) / BUFFER_SIZE) * 100
+                        seconds_recorded = len(audio_buffer) / 8000
+                        print(f"📦 Acumulando... {percentage:.0f}% ({seconds_recorded:.1f}s de 5s)")
                     continue
                 
                 print(f"🎤 Procesando {len(audio_buffer)} bytes de audio ({chunks_received} chunks)...")
@@ -308,19 +322,34 @@ async def media_stream(ws: WebSocket):
                         continue
                         
                     print(f"💬 User: {text}")
+                    
+                    # Evitar procesar lo mismo dos veces
+                    current_time = time.time()
+                    if last_response_time > 0 and current_time - last_response_time < 5:
+                        print("⏭️  Ignorando (acabamos de responder hace menos de 5 seg)")
+                        is_speaking = False
+                        continue
 
                     # Marcar que vamos a responder
                     is_speaking = True
+                    
+                    # IMPORTANTE: Limpiar cualquier audio acumulado durante el procesamiento
+                    audio_buffer = b""
+                    chunks_received = 0
 
                     # Agent (Groq)
                     reply = agent_reply(text)
                     print(f"🤖 Agent: {reply}")
 
-                    # Enviar respuesta de audio
+                    # Enviar respuesta de audio (esto ya incluye el delay)
                     await send_audio_to_twilio(ws, stream_sid, reply)
                     
-                    # Permitir escuchar de nuevo
+                    # Actualizar timestamp de última respuesta
+                    last_response_time = time.time()
+                    
+                    # Ahora sí, permitir escuchar de nuevo
                     is_speaking = False
+                    print("👂 Ahora escuchando al usuario...")
                     
                 except Exception as e:
                     print(f"❌ Error procesando audio: {e}")
