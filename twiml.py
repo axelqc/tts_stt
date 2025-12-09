@@ -5,10 +5,8 @@ def twiml_response(host):
     """
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+    <Say language="es-MX">Hola, conectando con el asistente. Por favor espera un momento.</Say>
     <Connect>
-        <Stream url="wss://{host}/media-stream">
-            <Parameter name="track" value="inbound_track" />
-        </Stream>
+        <Stream url="wss://{host}/media-stream" />
     </Connect>
-    <Say language="es-MX">Conectando con el asistente</Say>
 </Response>"""
