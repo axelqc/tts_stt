@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-dotenv
+pydantic
+websockets
+ibm-watson
+ibm-cloud-sdk-core
+groq
+twilio
