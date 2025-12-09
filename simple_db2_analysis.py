@@ -11,12 +11,15 @@ from conversation_logger import logger
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-def analyze_and_save_to_db2(call_sid=None):
+def analyze_and_save_to_db2(call_sid=None, conversation_data=None):
     """
     Analiza una conversación y la sube a DB2
+    Puede recibir call_sid O conversation_data directamente
     """
     # 1. Obtener conversación
-    if call_sid:
+    if conversation_data:
+        conv = conversation_data
+    elif call_sid:
         conv = logger.get_conversation(call_sid)
     else:
         # Última conversación
@@ -25,7 +28,7 @@ def analyze_and_save_to_db2(call_sid=None):
     
     if not conv:
         print("❌ No se encontró conversación")
-        return
+        return False
     
     print(f"📞 Analizando conversación: {conv['call_sid']}")
     
@@ -108,9 +111,12 @@ Formato JSON:
         if analysis.get('calificacion_lead') == 'caliente':
             print("\n🔥🔥🔥 LEAD CALIENTE! 🔥🔥🔥")
         
+        return True
+        
     except Exception as e:
         print(f"❌ Error guardando en DB2: {e}")
         ibm_db.close(conn)
+        return False
 
 
 def list_recent_conversations():
