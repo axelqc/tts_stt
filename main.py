@@ -98,7 +98,7 @@ async def media_stream(ws: WebSocket):
                     result = stt.recognize(
                         audio=pcm_audio,
                         content_type="audio/l16; rate=16000",
-                        model="es-LA_BroadbandModel"  # Modelo en español
+                        model="es-ES_BroadbandModel"  # Modelo en español
                     ).get_result()
 
                     text = ""
