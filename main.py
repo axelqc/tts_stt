@@ -40,15 +40,27 @@ def convert_mulaw_to_pcm_16k(mulaw_data):
     Convierte audio μ-law 8kHz a PCM linear 16kHz para IBM Watson STT
     """
     try:
+        print(f"🔄 Convirtiendo {len(mulaw_data)} bytes de μ-law...")
+        
         # Decodificar μ-law a PCM linear 16-bit
         pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+        print(f"   ✓ Decodificado a PCM: {len(pcm_data)} bytes")
         
         # Resamplear de 8kHz a 16kHz
         pcm_16k, _ = audioop.ratecv(pcm_data, 2, 1, 8000, 16000, None)
+        print(f"   ✓ Resampleado a 16kHz: {len(pcm_16k)} bytes")
+        
+        # Normalizar volumen (amplificar si es muy bajo)
+        rms = audioop.rms(pcm_16k, 2)
+        print(f"   📊 Volumen RMS: {rms}")
+        
+        if rms < 500:  # Si el volumen es muy bajo
+            print(f"   🔊 Amplificando audio (RMS bajo: {rms})")
+            pcm_16k = audioop.mul(pcm_16k, 2, 3.0)  # Amplificar 3x
         
         return pcm_16k
     except Exception as e:
-        print(f"Error en conversión de audio: {e}")
+        print(f"❌ Error en conversión de audio: {e}")
         raise
 
 def convert_wav_to_mulaw_8k(wav_data):
@@ -100,8 +112,9 @@ async def media_stream(ws: WebSocket):
 
     stream_sid = None
     audio_buffer = b""
-    # Buffer más grande: 2 segundos de audio (16000 bytes a 8kHz μ-law)
-    BUFFER_SIZE = 16000
+    # Buffer más grande: 3 segundos para mejor detección
+    BUFFER_SIZE = 24000  # 3 segundos a 8kHz μ-law
+    is_speaking = False
 
     try:
         while True:
@@ -119,6 +132,10 @@ async def media_stream(ws: WebSocket):
                 print(f"📋 Stream config: {json.dumps(data['start'], indent=2)}")
 
             elif data["event"] == "media":
+                # No procesar audio mientras el bot está hablando
+                if is_speaking:
+                    continue
+                    
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
                 
@@ -135,25 +152,41 @@ async def media_stream(ws: WebSocket):
                 
                 print(f"🎤 Procesando {len(audio_buffer)} bytes de audio...")
                 
+                # Marcar que el bot va a hablar
+                is_speaking = True
+                
                 try:
                     # Convertir de μ-law 8kHz a PCM 16kHz
                     pcm_audio = convert_mulaw_to_pcm_16k(audio_buffer)
                     
-                    # IBM STT
+                    print(f"📊 Audio convertido: {len(pcm_audio)} bytes PCM")
+                    
+                    # IBM STT con parámetros optimizados
                     result = stt.recognize(
                         audio=pcm_audio,
-                        content_type="audio/l16; rate=16000"
+                        content_type="audio/l16; rate=16000",
+                        model="es-ES_BroadbandModel",  # Modelo en español explícito
+                        smart_formatting=True,
+                        end_of_phrase_silence_time=0.5,
+                        background_audio_suppression=0.5
                     ).get_result()
+                    
+                    print(f"🔍 Resultado STT completo: {json.dumps(result, indent=2)}")
 
                     text = ""
                     if result.get("results") and len(result["results"]) > 0:
-                        text = result["results"][0]["alternatives"][0]["transcript"].strip()
+                        alternatives = result["results"][0].get("alternatives", [])
+                        if alternatives and len(alternatives) > 0:
+                            text = alternatives[0].get("transcript", "").strip()
+                            confidence = alternatives[0].get("confidence", 0)
+                            print(f"📝 Transcripción: '{text}' (confianza: {confidence:.2f})")
                     
                     # Limpiar buffer después de procesar
                     audio_buffer = b""
                     
                     if not text:
                         print("⚠️  No se detectó texto")
+                        is_speaking = False  # Permitir seguir escuchando
                         continue
                         
                     print(f"💬 User: {text}")
@@ -186,9 +219,13 @@ async def media_stream(ws: WebSocket):
                     
                     print("✅ Audio enviado")
                     
+                    # Permitir escuchar de nuevo después de hablar
+                    is_speaking = False
+                    
                 except Exception as e:
                     print(f"❌ Error procesando audio: {e}")
                     audio_buffer = b""
+                    is_speaking = False  # Permitir seguir escuchando
                     continue
 
             elif data["event"] == "stop":
