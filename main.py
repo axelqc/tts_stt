@@ -17,6 +17,7 @@ from agent import agent_reply
 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_watson import SpeechToTextV1, TextToSpeechV1
 from twiml import twiml_response
+from conversation_logger import logger
 
 load_dotenv()
 
@@ -171,6 +172,41 @@ async def send_greeting(ws, stream_sid):
 async def root():
     return {"status": "server running"}
 
+@app.get("/conversations")
+async def list_conversations(limit: int = 10):
+    """Lista las últimas conversaciones"""
+    conversations = logger.list_conversations(limit)
+    return {"conversations": conversations, "total": len(conversations)}
+
+@app.get("/conversation/{call_sid}")
+async def get_conversation(call_sid: str):
+    """Obtiene una conversación específica"""
+    conversation = logger.get_conversation(call_sid)
+    if not conversation:
+        return {"error": "Conversación no encontrada"}
+    return conversation
+
+@app.get("/conversation/{call_sid}/analyze")
+async def analyze_conv(call_sid: str):
+    """Analiza una conversación específica"""
+    from conversation_analyzer import analyze_conversation
+    analysis = analyze_conversation(call_sid)
+    return analysis
+
+@app.get("/conversation/{call_sid}/follow-up")
+async def get_follow_up(call_sid: str):
+    """Genera script de seguimiento"""
+    from conversation_analyzer import generate_follow_up_script
+    script = generate_follow_up_script(call_sid)
+    return {"script": script}
+
+@app.get("/stats")
+async def get_stats(days: int = 7):
+    """Obtiene estadísticas de conversaciones"""
+    from conversation_analyzer import get_conversation_stats
+    stats = get_conversation_stats(days)
+    return stats
+
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
     host = request.url.hostname
@@ -203,6 +239,10 @@ async def media_stream(ws: WebSocket):
             elif data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
                 print(f"🔵 Stream started: {stream_sid}")
+                
+                # Iniciar logging de la conversación
+                caller_number = data["start"].get("customParameters", {}).get("caller", "unknown")
+                logger.start_conversation(stream_sid, caller_number)
                 
                 # Verificar configuración del stream
                 media_format = data["start"].get("mediaFormat", {})
@@ -323,6 +363,9 @@ async def media_stream(ws: WebSocket):
                         
                     print(f"💬 User: {text}")
                     
+                    # Guardar mensaje del usuario
+                    logger.add_message("user", text, confidence)
+                    
                     # Evitar procesar lo mismo dos veces
                     current_time = time.time()
                     if last_response_time > 0 and current_time - last_response_time < 5:
@@ -340,6 +383,9 @@ async def media_stream(ws: WebSocket):
                     # Agent (Groq)
                     reply = agent_reply(text)
                     print(f"🤖 Agent: {reply}")
+                    
+                    # Guardar respuesta del asistente
+                    logger.add_message("assistant", reply)
 
                     # Enviar respuesta de audio (esto ya incluye el delay)
                     await send_audio_to_twilio(ws, stream_sid, reply)
@@ -359,9 +405,35 @@ async def media_stream(ws: WebSocket):
 
             elif data["event"] == "stop":
                 print("🔴 Stream stopped")
+                
+                # Guardar conversación en JSON
+                conversation_data = logger.end_conversation()
+                
+                if conversation_data:
+                    print(f"✅ Conversación guardada: {conversation_data['call_sid']}")
+                    
+                    # Analizar y subir a DB2 automáticamente
+                    try:
+                        print("\n🤖 Analizando y subiendo a DB2...")
+                        from simple_db2_analysis import analyze_and_save_to_db2
+                        success = analyze_and_save_to_db2(conversation_data=conversation_data)
+                        
+                        if success:
+                            print("✅ Análisis completado y guardado en DB2")
+                        else:
+                            print("⚠️  No se pudo completar el análisis")
+                            
+                    except Exception as e:
+                        print(f"❌ Error en análisis automático: {e}")
+                        print(f"💡 Puedes analizarla manualmente: python simple_db2_analysis.py {conversation_data['call_sid']}")
+                
                 break
 
     except WebSocketDisconnect:
         print("❌ Client disconnected.")
+        if logger.current_conversation:
+            logger.end_conversation()
     except Exception as e:
         print(f"❌ Error en websocket: {e}")
+        if logger.current_conversation:
+            logger.end_conversation()
