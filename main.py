@@ -42,21 +42,36 @@ def convert_mulaw_to_pcm_16k(mulaw_data):
     try:
         print(f"🔄 Convirtiendo {len(mulaw_data)} bytes de μ-law...")
         
+        # Verificar que no sea todo silencio
+        unique_bytes = len(set(mulaw_data))
+        print(f"   📊 Bytes únicos en μ-law: {unique_bytes} (debería ser > 10)")
+        
+        if unique_bytes < 5:
+            print(f"   ⚠️  Audio parece ser silencio (muy pocos valores únicos)")
+        
         # Decodificar μ-law a PCM linear 16-bit
         pcm_data = audioop.ulaw2lin(mulaw_data, 2)
         print(f"   ✓ Decodificado a PCM: {len(pcm_data)} bytes")
+        
+        # Calcular RMS antes del resampling
+        rms_original = audioop.rms(pcm_data, 2)
+        print(f"   📊 Volumen RMS original (8kHz): {rms_original}")
         
         # Resamplear de 8kHz a 16kHz
         pcm_16k, _ = audioop.ratecv(pcm_data, 2, 1, 8000, 16000, None)
         print(f"   ✓ Resampleado a 16kHz: {len(pcm_16k)} bytes")
         
-        # Normalizar volumen (amplificar si es muy bajo)
+        # Calcular RMS después del resampling
         rms = audioop.rms(pcm_16k, 2)
-        print(f"   📊 Volumen RMS: {rms}")
+        print(f"   📊 Volumen RMS final (16kHz): {rms}")
         
-        if rms < 500:  # Si el volumen es muy bajo
-            print(f"   🔊 Amplificando audio (RMS bajo: {rms})")
-            pcm_16k = audioop.mul(pcm_16k, 2, 3.0)  # Amplificar 3x
+        # Amplificar si es necesario
+        if rms < 300:
+            factor = min(5.0, 1500 / max(rms, 1))  # Amplificar hasta factor 5x
+            print(f"   🔊 Amplificando audio {factor:.1f}x (RMS muy bajo: {rms})")
+            pcm_16k = audioop.mul(pcm_16k, 2, factor)
+            rms_final = audioop.rms(pcm_16k, 2)
+            print(f"   ✓ RMS después de amplificar: {rms_final}")
         
         return pcm_16k
     except Exception as e:
@@ -95,6 +110,47 @@ def convert_wav_to_mulaw_8k(wav_data):
         print(f"Error convirtiendo WAV a μ-law: {e}")
         raise
 
+async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice"):
+    """
+    Convierte texto a audio y lo envía a Twilio
+    """
+    try:
+        print(f"🔊 Generando audio para: '{text}'")
+        
+        # IBM TTS
+        audio_reply = tts.synthesize(
+            text=text,
+            accept="audio/wav",
+            voice=voice
+        ).get_result().content
+
+        # Convertir a μ-law para Twilio
+        mulaw_audio = convert_wav_to_mulaw_8k(audio_reply)
+        
+        # Enviar en chunks de 20ms (160 bytes a 8kHz)
+        chunk_size = 160
+        for i in range(0, len(mulaw_audio), chunk_size):
+            chunk = mulaw_audio[i:i+chunk_size]
+            chunk_b64 = base64.b64encode(chunk).decode()
+            
+            await ws.send_json({
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": chunk_b64}
+            })
+        
+        print("✅ Audio enviado completamente")
+        
+    except Exception as e:
+        print(f"❌ Error enviando audio: {e}")
+
+async def send_greeting(ws, stream_sid):
+    """
+    Envía saludo inicial
+    """
+    greeting = "Hola, soy tu asistente inmobiliario. ¿En qué puedo ayudarte hoy?"
+    await send_audio_to_twilio(ws, stream_sid, greeting)
+
 @app.get("/")
 async def root():
     return {"status": "server running"}
@@ -112,10 +168,10 @@ async def media_stream(ws: WebSocket):
 
     stream_sid = None
     audio_buffer = b""
-    # Buffer de 2 segundos
     BUFFER_SIZE = 16000  # 2 segundos a 8kHz μ-law
     is_speaking = False
     chunks_received = 0
+    has_greeted = False  # Flag para saludo inicial
 
     try:
         while True:
@@ -130,7 +186,18 @@ async def media_stream(ws: WebSocket):
             elif data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
                 print(f"🔵 Stream started: {stream_sid}")
-                print(f"📋 Stream config: {json.dumps(data['start'], indent=2)}")
+                
+                # Verificar configuración del stream
+                media_format = data["start"].get("mediaFormat", {})
+                print(f"📋 Media format: {json.dumps(media_format, indent=2)}")
+                print(f"📋 Tracks: {data['start'].get('tracks', 'N/A')}")
+                
+                # Enviar saludo inicial solo una vez
+                if not has_greeted:
+                    has_greeted = True
+                    is_speaking = True  # Marcar como hablando durante saludo
+                    await send_greeting(ws, stream_sid)
+                    is_speaking = False  # Listo para escuchar
 
             elif data["event"] == "media":
                 # No procesar audio mientras el bot está hablando
@@ -162,7 +229,8 @@ async def media_stream(ws: WebSocket):
                 if len(audio_buffer) < BUFFER_SIZE:
                     continue
                 
-                print(f"🎤 Procesando {len(audio_buffer)} bytes de audio...")
+                print(f"🎤 Procesando {len(audio_buffer)} bytes de audio ({chunks_received} chunks)...")
+                chunks_received = 0  # Reset contador
                 
                 # Marcar que el bot va a hablar
                 is_speaking = True
@@ -199,40 +267,22 @@ async def media_stream(ws: WebSocket):
                     
                     if not text:
                         print("⚠️  No se detectó texto")
-                        is_speaking = False  # Permitir seguir escuchando
+                        is_speaking = False
                         continue
                         
                     print(f"💬 User: {text}")
+
+                    # Marcar que vamos a responder
+                    is_speaking = True
 
                     # Agent (Groq)
                     reply = agent_reply(text)
                     print(f"🤖 Agent: {reply}")
 
-                    # IBM TTS
-                    audio_reply = tts.synthesize(
-                        text=reply,
-                        accept="audio/wav",
-                        voice="es-LA_SofiaV3Voice"
-                    ).get_result().content
-
-                    # Convertir a μ-law para Twilio
-                    mulaw_audio = convert_wav_to_mulaw_8k(audio_reply)
+                    # Enviar respuesta de audio
+                    await send_audio_to_twilio(ws, stream_sid, reply)
                     
-                    # Twilio espera chunks de 20ms (160 bytes a 8kHz)
-                    chunk_size = 160
-                    for i in range(0, len(mulaw_audio), chunk_size):
-                        chunk = mulaw_audio[i:i+chunk_size]
-                        chunk_b64 = base64.b64encode(chunk).decode()
-                        
-                        await ws.send_json({
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {"payload": chunk_b64}
-                        })
-                    
-                    print("✅ Audio enviado")
-                    
-                    # Permitir escuchar de nuevo después de hablar
+                    # Permitir escuchar de nuevo
                     is_speaking = False
                     
                 except Exception as e:
