@@ -8,3 +8,4 @@ ibm-cloud-sdk-core
 groq
 twilio
 audioop-lts
+pydub
