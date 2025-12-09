@@ -85,7 +85,7 @@ def convert_wav_to_mulaw_8k(wav_data):
 
 @app.get("/")
 async def root():
-    return {"status": "server running :)"}
+    return {"status": "server running"}
 
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
@@ -96,7 +96,7 @@ async def incoming_call(request: Request):
 @app.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
     await ws.accept()
-    print("✅ Client connected.)")
+    print("✅ Client connected.")
 
     stream_sid = None
     audio_buffer = b""
@@ -107,14 +107,24 @@ async def media_stream(ws: WebSocket):
         while True:
             msg = await ws.receive_text()
             data = json.loads(msg)
+            
+            print(f"📨 Evento recibido: {data['event']}")
 
-            if data["event"] == "start":
+            if data["event"] == "connected":
+                print("🔗 WebSocket conectado con Twilio")
+            
+            elif data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
                 print(f"🔵 Stream started: {stream_sid}")
+                print(f"📋 Stream config: {json.dumps(data['start'], indent=2)}")
 
             elif data["event"] == "media":
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
+                
+                # Debug: mostrar primeros bytes
+                if len(audio_buffer) == 0:
+                    print(f"🎵 Primer chunk recibido: {len(audio_bytes)} bytes")
                 
                 # Acumular audio
                 audio_buffer += audio_bytes
