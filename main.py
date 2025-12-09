@@ -7,6 +7,7 @@ import base64
 import audioop
 import io
 import wave
+import asyncio
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
@@ -67,11 +68,13 @@ def convert_mulaw_to_pcm_16k(mulaw_data):
         
         # Amplificar si es necesario
         if rms < 300:
-            factor = min(5.0, 1500 / max(rms, 1))  # Amplificar hasta factor 5x
-            print(f"   🔊 Amplificando audio {factor:.1f}x (RMS muy bajo: {rms})")
+            factor = min(3.0, 900 / max(rms, 1))  # Amplificar hasta factor 3x
+            print(f"   🔊 Amplificando audio {factor:.1f}x (RMS bajo: {rms})")
             pcm_16k = audioop.mul(pcm_16k, 2, factor)
             rms_final = audioop.rms(pcm_16k, 2)
             print(f"   ✓ RMS después de amplificar: {rms_final}")
+        else:
+            print(f"   ✓ RMS suficiente, no se amplifica")
         
         return pcm_16k
     except Exception as e:
@@ -129,6 +132,7 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice")
         
         # Enviar en chunks de 20ms (160 bytes a 8kHz)
         chunk_size = 160
+        chunks_sent = 0
         for i in range(0, len(mulaw_audio), chunk_size):
             chunk = mulaw_audio[i:i+chunk_size]
             chunk_b64 = base64.b64encode(chunk).decode()
@@ -138,8 +142,13 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice")
                 "streamSid": stream_sid,
                 "media": {"payload": chunk_b64}
             })
+            chunks_sent += 1
         
-        print("✅ Audio enviado completamente")
+        print(f"✅ Audio enviado completamente ({chunks_sent} chunks)")
+        
+        # Pequeño delay después de enviar para que termine de reproducirse
+        import asyncio
+        await asyncio.sleep(0.5)
         
     except Exception as e:
         print(f"❌ Error enviando audio: {e}")
@@ -168,7 +177,7 @@ async def media_stream(ws: WebSocket):
 
     stream_sid = None
     audio_buffer = b""
-    BUFFER_SIZE = 16000  # 2 segundos a 8kHz μ-law
+    BUFFER_SIZE = 24000  # 3 segundos a 8kHz μ-law para mejor reconocimiento
     is_speaking = False
     chunks_received = 0
     has_greeted = False  # Flag para saludo inicial
@@ -232,6 +241,14 @@ async def media_stream(ws: WebSocket):
                 print(f"🎤 Procesando {len(audio_buffer)} bytes de audio ({chunks_received} chunks)...")
                 chunks_received = 0  # Reset contador
                 
+                # Verificar que no sea todo silencio ANTES de convertir
+                unique_bytes = len(set(audio_buffer))
+                if unique_bytes < 10:
+                    print(f"⚠️  Buffer rechazado: solo {unique_bytes} bytes únicos (es silencio)")
+                    audio_buffer = b""
+                    is_speaking = False
+                    continue
+                
                 # Marcar que el bot va a hablar
                 is_speaking = True
                 
@@ -255,6 +272,7 @@ async def media_stream(ws: WebSocket):
                     print(f"🔍 Resultado STT completo: {json.dumps(result, indent=2)}")
 
                     text = ""
+                    confidence = 0
                     if result.get("results") and len(result["results"]) > 0:
                         alternatives = result["results"][0].get("alternatives", [])
                         if alternatives and len(alternatives) > 0:
@@ -265,8 +283,9 @@ async def media_stream(ws: WebSocket):
                     # Limpiar buffer después de procesar
                     audio_buffer = b""
                     
-                    if not text:
-                        print("⚠️  No se detectó texto")
+                    # Filtrar resultados con baja confianza o muy cortos
+                    if not text or len(text) < 3 or confidence < 0.6:
+                        print(f"⚠️  Transcripción rechazada (muy corta o baja confianza)")
                         is_speaking = False
                         continue
                         
