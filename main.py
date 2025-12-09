@@ -258,16 +258,34 @@ async def media_stream(ws: WebSocket):
                     
                     print(f"📊 Audio convertido: {len(pcm_audio)} bytes PCM")
                     
-                    # Guardar audio para debug (opcional - comentar en producción)
-                    # with open(f"/tmp/audio_debug_{stream_sid}.raw", "wb") as f:
-                    #     f.write(pcm_audio)
+                    # IBM STT - Probar modelos en español
+                    spanish_models = [
+                        "es-MX_BroadbandModel",  # Español México (mejor para Latinoamérica)
+                        "es-ES_BroadbandModel",   # Español España
+                        "es-LA_BroadbandModel",   # Español Latinoamérica
+                    ]
                     
-                    # Intentar primero sin especificar modelo (usar default)
-                    print("🔄 Intentando con modelo por defecto...")
-                    result = stt.recognize(
-                        audio=pcm_audio,
-                        content_type="audio/l16; rate=16000"
-                    ).get_result()
+                    result = None
+                    for model in spanish_models:
+                        try:
+                            print(f"🔄 Intentando con modelo {model}...")
+                            result = stt.recognize(
+                                audio=pcm_audio,
+                                content_type="audio/l16; rate=16000",
+                                model=model
+                            ).get_result()
+                            print(f"✅ Modelo {model} funcionó!")
+                            break
+                        except Exception as model_error:
+                            print(f"⚠️  Modelo {model} no disponible: {model_error}")
+                            continue
+                    
+                    if not result:
+                        print("❌ Ningún modelo en español disponible, usando default")
+                        result = stt.recognize(
+                            audio=pcm_audio,
+                            content_type="audio/l16; rate=16000"
+                        ).get_result()
                     
                     print(f"🔍 Resultado STT completo: {json.dumps(result, indent=2)}")
 
