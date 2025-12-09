@@ -96,7 +96,7 @@ async def incoming_call(request: Request):
 @app.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
     await ws.accept()
-    print("✅ Client connected.")
+    print("✅ Client connected.)")
 
     stream_sid = None
     audio_buffer = b""
