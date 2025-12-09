@@ -85,7 +85,7 @@ def convert_wav_to_mulaw_8k(wav_data):
 
 @app.get("/")
 async def root():
-    return {"status": "server running"}
+    return {"status": "server running :)"}
 
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
