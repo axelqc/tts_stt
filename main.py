@@ -38,7 +38,6 @@ tts.set_service_url(IBM_TTS_URL)
 def convert_mulaw_to_pcm_16k(mulaw_data):
     """
     Convierte audio μ-law 8kHz a PCM linear 16kHz para IBM Watson STT
-    Usa audioop (built-in) para evitar dependencia de ffmpeg
     """
     try:
         # Decodificar μ-law a PCM linear 16-bit
@@ -50,6 +49,38 @@ def convert_mulaw_to_pcm_16k(mulaw_data):
         return pcm_16k
     except Exception as e:
         print(f"Error en conversión de audio: {e}")
+        raise
+
+def convert_wav_to_mulaw_8k(wav_data):
+    """
+    Convierte WAV a μ-law 8kHz para Twilio
+    """
+    try:
+        with wave.open(io.BytesIO(wav_data), 'rb') as wav_file:
+            params = wav_file.getparams()
+            frames = wav_file.readframes(params.nframes)
+            
+            # Resamplear a 8kHz si es necesario
+            if params.framerate != 8000:
+                frames, _ = audioop.ratecv(
+                    frames,
+                    params.sampwidth,
+                    params.nchannels,
+                    params.framerate,
+                    8000,
+                    None
+                )
+            
+            # Convertir a mono si es necesario
+            if params.nchannels == 2:
+                frames = audioop.tomono(frames, params.sampwidth, 1, 1)
+            
+            # Convertir a μ-law
+            mulaw_audio = audioop.lin2ulaw(frames, params.sampwidth)
+            
+            return mulaw_audio
+    except Exception as e:
+        print(f"Error convirtiendo WAV a μ-law: {e}")
         raise
 
 @app.get("/")
@@ -65,10 +96,12 @@ async def incoming_call(request: Request):
 @app.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
     await ws.accept()
-    print("Client connected.")
+    print("✅ Client connected.")
 
     stream_sid = None
-    audio_buffer = b""  # Buffer para acumular audio
+    audio_buffer = b""
+    # Buffer más grande: 2 segundos de audio (16000 bytes a 8kHz μ-law)
+    BUFFER_SIZE = 16000
 
     try:
         while True:
@@ -77,28 +110,29 @@ async def media_stream(ws: WebSocket):
 
             if data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
-                print("🔵 Stream started", stream_sid)
+                print(f"🔵 Stream started: {stream_sid}")
 
             elif data["event"] == "media":
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
                 
-                # Acumular audio (Twilio envía chunks pequeños)
+                # Acumular audio
                 audio_buffer += audio_bytes
                 
-                # Procesar cuando tengamos suficiente audio (ej: 0.5 segundos = 4000 bytes a 8kHz)
-                if len(audio_buffer) < 4000:
+                # Procesar cuando tengamos suficiente audio (2 segundos)
+                if len(audio_buffer) < BUFFER_SIZE:
                     continue
+                
+                print(f"🎤 Procesando {len(audio_buffer)} bytes de audio...")
                 
                 try:
                     # Convertir de μ-law 8kHz a PCM 16kHz
                     pcm_audio = convert_mulaw_to_pcm_16k(audio_buffer)
                     
-                    # IBM STT con formato correcto
+                    # IBM STT
                     result = stt.recognize(
                         audio=pcm_audio,
-                        content_type="audio/l16; rate=16000",
-                        model="es-ES_BroadbandModel"  # Modelo en español
+                        content_type="audio/l16; rate=16000"
                     ).get_result()
 
                     text = ""
@@ -109,13 +143,14 @@ async def media_stream(ws: WebSocket):
                     audio_buffer = b""
                     
                     if not text:
+                        print("⚠️  No se detectó texto")
                         continue
                         
-                    print("💤 User:", text)
+                    print(f"💬 User: {text}")
 
                     # Agent (Groq)
                     reply = agent_reply(text)
-                    print("🤖 Agent:", reply)
+                    print(f"🤖 Agent: {reply}")
 
                     # IBM TTS
                     audio_reply = tts.synthesize(
@@ -124,41 +159,26 @@ async def media_stream(ws: WebSocket):
                         voice="es-LA_SofiaV3Voice"
                     ).get_result().content
 
-                    # Convertir respuesta WAV a μ-law 8kHz para Twilio
-                    # Leer WAV
-                    with wave.open(io.BytesIO(audio_reply), 'rb') as wav_file:
-                        params = wav_file.getparams()
-                        frames = wav_file.readframes(params.nframes)
-                        
-                        # Resamplear a 8kHz si es necesario
-                        if params.framerate != 8000:
-                            frames, _ = audioop.ratecv(
-                                frames,
-                                params.sampwidth,
-                                params.nchannels,
-                                params.framerate,
-                                8000,
-                                None
-                            )
-                        
-                        # Convertir a mono si es necesario
-                        if params.nchannels == 2:
-                            frames = audioop.tomono(frames, params.sampwidth, 1, 1)
-                        
-                        # Convertir a μ-law
-                        mulaw_audio = audioop.lin2ulaw(frames, params.sampwidth)
+                    # Convertir a μ-law para Twilio
+                    mulaw_audio = convert_wav_to_mulaw_8k(audio_reply)
                     
-                    out_b64 = base64.b64encode(mulaw_audio).decode()
-
-                    await ws.send_json({
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {"payload": out_b64}
-                    })
+                    # Twilio espera chunks de 20ms (160 bytes a 8kHz)
+                    chunk_size = 160
+                    for i in range(0, len(mulaw_audio), chunk_size):
+                        chunk = mulaw_audio[i:i+chunk_size]
+                        chunk_b64 = base64.b64encode(chunk).decode()
+                        
+                        await ws.send_json({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": chunk_b64}
+                        })
+                    
+                    print("✅ Audio enviado")
                     
                 except Exception as e:
-                    print(f"Error procesando audio: {e}")
-                    audio_buffer = b""  # Limpiar buffer en caso de error
+                    print(f"❌ Error procesando audio: {e}")
+                    audio_buffer = b""
                     continue
 
             elif data["event"] == "stop":
@@ -166,6 +186,6 @@ async def media_stream(ws: WebSocket):
                 break
 
     except WebSocketDisconnect:
-        print("Client disconnected.")
+        print("❌ Client disconnected.")
     except Exception as e:
-        print(f"Error en websocket: {e}")
+        print(f"❌ Error en websocket: {e}")
