@@ -9,3 +9,6 @@ groq
 twilio
 audioop-lts
 pydub
+ibm-db
+ibm-db-sa
+sqlalchemy
