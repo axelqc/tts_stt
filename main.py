@@ -4,6 +4,9 @@
 import os
 import json
 import base64
+import audioop
+import io
+from pydub import AudioSegment
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
@@ -32,6 +35,42 @@ tts_auth = IAMAuthenticator(IBM_TTS_APIKEY)
 tts = TextToSpeechV1(authenticator=tts_auth)
 tts.set_service_url(IBM_TTS_URL)
 
+def convert_mulaw_to_pcm_16k(mulaw_data):
+    """
+    Convierte audio μ-law 8kHz a PCM linear 16kHz para IBM Watson STT
+    """
+    try:
+        # Método 1: Usando pydub (más robusto)
+        audio = AudioSegment(
+            data=mulaw_data,
+            sample_width=1,  # μ-law es 8-bit
+            frame_rate=8000,
+            channels=1
+        )
+        
+        # Convertir a PCM 16-bit
+        audio = audio.set_sample_width(2)  # 16-bit
+        
+        # Resamplear a 16kHz
+        audio = audio.set_frame_rate(16000)
+        
+        return audio.raw_data
+    
+    except Exception as e:
+        print(f"Error en conversión con pydub: {e}")
+        # Método 2: Fallback usando audioop (más ligero pero menos robusto)
+        try:
+            # Decodificar μ-law a PCM linear
+            pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+            
+            # Resamplear de 8kHz a 16kHz
+            pcm_16k = audioop.ratecv(pcm_data, 2, 1, 8000, 16000, None)[0]
+            
+            return pcm_16k
+        except Exception as e2:
+            print(f"Error en conversión con audioop: {e2}")
+            raise
+
 @app.get("/")
 async def root():
     return {"status": "server running"}
@@ -48,6 +87,7 @@ async def media_stream(ws: WebSocket):
     print("Client connected.")
 
     stream_sid = None
+    audio_buffer = b""  # Buffer para acumular audio
 
     try:
         while True:
@@ -61,38 +101,69 @@ async def media_stream(ws: WebSocket):
             elif data["event"] == "media":
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
-
-                # IBM STT
-                result = stt.recognize(
-                    audio=audio_bytes,
-                    content_type="audio/l16; rate=8000"
-                ).get_result()
-
-                text = ""
-                try:
-                    text = result["results"][0]["alternatives"][0]["transcript"]
-                    print("👤 User:", text)
-                except:
+                
+                # Acumular audio (Twilio envía chunks pequeños)
+                audio_buffer += audio_bytes
+                
+                # Procesar cuando tengamos suficiente audio (ej: 0.5 segundos = 4000 bytes a 8kHz)
+                if len(audio_buffer) < 4000:
                     continue
+                
+                try:
+                    # Convertir de μ-law 8kHz a PCM 16kHz
+                    pcm_audio = convert_mulaw_to_pcm_16k(audio_buffer)
+                    
+                    # IBM STT con formato correcto
+                    result = stt.recognize(
+                        audio=pcm_audio,
+                        content_type="audio/l16; rate=16000; channels=1",
+                        model="es-LA_BroadbandModel",  # Modelo en español
+                        continuous=True,
+                        interim_results=False
+                    ).get_result()
 
-                # Agent (Groq)
-                reply = agent_reply(text)
-                print("🤖 Agent:", reply)
+                    text = ""
+                    if result.get("results") and len(result["results"]) > 0:
+                        text = result["results"][0]["alternatives"][0]["transcript"].strip()
+                    
+                    # Limpiar buffer después de procesar
+                    audio_buffer = b""
+                    
+                    if not text:
+                        continue
+                        
+                    print("💤 User:", text)
 
-                # IBM TTS
-                audio_reply = tts.synthesize(
-                    text=reply,
-                    accept="audio/wav",
-                    voice="es-LA_SofiaV3Voice"
-                ).get_result().content
+                    # Agent (Groq)
+                    reply = agent_reply(text)
+                    print("🤖 Agent:", reply)
 
-                out_b64 = base64.b64encode(audio_reply).decode()
+                    # IBM TTS
+                    audio_reply = tts.synthesize(
+                        text=reply,
+                        accept="audio/wav",
+                        voice="es-LA_SofiaV3Voice"
+                    ).get_result().content
 
-                await ws.send_json({
-                    "event": "media",
-                    "streamSid": stream_sid,
-                    "media": {"payload": out_b64}
-                })
+                    # Convertir respuesta a formato Twilio (μ-law 8kHz)
+                    audio_wav = AudioSegment.from_file(io.BytesIO(audio_reply), format="wav")
+                    audio_wav = audio_wav.set_frame_rate(8000)
+                    audio_wav = audio_wav.set_channels(1)
+                    
+                    # Convertir a μ-law
+                    mulaw_audio = audioop.lin2ulaw(audio_wav.raw_data, 2)
+                    out_b64 = base64.b64encode(mulaw_audio).decode()
+
+                    await ws.send_json({
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {"payload": out_b64}
+                    })
+                    
+                except Exception as e:
+                    print(f"Error procesando audio: {e}")
+                    audio_buffer = b""  # Limpiar buffer en caso de error
+                    continue
 
             elif data["event"] == "stop":
                 print("🔴 Stream stopped")
@@ -100,3 +171,5 @@ async def media_stream(ws: WebSocket):
 
     except WebSocketDisconnect:
         print("Client disconnected.")
+    except Exception as e:
+        print(f"Error en websocket: {e}")
