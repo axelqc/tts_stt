@@ -97,10 +97,8 @@ async def media_stream(ws: WebSocket):
                     # IBM STT con formato correcto
                     result = stt.recognize(
                         audio=pcm_audio,
-                        content_type="audio/l16; rate=16000; channels=1",
-                        model="es-LA_BroadbandModel",  # Modelo en español
-                        continuous=True,
-                        interim_results=False
+                        content_type="audio/l16; rate=16000",
+                        model="es-LA_BroadbandModel"  # Modelo en español
                     ).get_result()
 
                     text = ""
