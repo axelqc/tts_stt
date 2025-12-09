@@ -11,9 +11,19 @@ PROPERTIES = [
         "cuartos": 2,
         "banos": 2,
         "area": 140,
-        "keywords": ["playa", "costa", "mar", "vallarta", "frente al mar", "condominio"]
+        "keywords": ["playa", "costa", "mar", "vallarta", "frente al mar", "condominio", "jalisco"]
+    },
+    {
+        "id": 2,
+        "nombre": "Residencial Los Pinos",
+        "descripcion": "Casas en privada con amenidades familiares. Parque infantil, cancha deportiva y casa club. Ambiente tranquilo y seguro.",
+        "ubicacion": "Veracruz, Veracruz",
+        "precio": 2800000,
+        "cuartos": 3,
+        "banos": 2,
+        "area": 150,
+        "keywords": ["veracruz", "familia", "familiar", "niños", "infantil", "deportiva", "casa club", "privada", "seguro", "tranquilo"]
     }
-    # Puedes agregar más propiedades aquí
 ]
 
 def format_price(price):
