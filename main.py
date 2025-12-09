@@ -6,7 +6,7 @@ import json
 import base64
 import audioop
 import io
-from pydub import AudioSegment
+import wave
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
@@ -38,38 +38,19 @@ tts.set_service_url(IBM_TTS_URL)
 def convert_mulaw_to_pcm_16k(mulaw_data):
     """
     Convierte audio μ-law 8kHz a PCM linear 16kHz para IBM Watson STT
+    Usa audioop (built-in) para evitar dependencia de ffmpeg
     """
     try:
-        # Método 1: Usando pydub (más robusto)
-        audio = AudioSegment(
-            data=mulaw_data,
-            sample_width=1,  # μ-law es 8-bit
-            frame_rate=8000,
-            channels=1
-        )
+        # Decodificar μ-law a PCM linear 16-bit
+        pcm_data = audioop.ulaw2lin(mulaw_data, 2)
         
-        # Convertir a PCM 16-bit
-        audio = audio.set_sample_width(2)  # 16-bit
+        # Resamplear de 8kHz a 16kHz
+        pcm_16k, _ = audioop.ratecv(pcm_data, 2, 1, 8000, 16000, None)
         
-        # Resamplear a 16kHz
-        audio = audio.set_frame_rate(16000)
-        
-        return audio.raw_data
-    
+        return pcm_16k
     except Exception as e:
-        print(f"Error en conversión con pydub: {e}")
-        # Método 2: Fallback usando audioop (más ligero pero menos robusto)
-        try:
-            # Decodificar μ-law a PCM linear
-            pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-            
-            # Resamplear de 8kHz a 16kHz
-            pcm_16k = audioop.ratecv(pcm_data, 2, 1, 8000, 16000, None)[0]
-            
-            return pcm_16k
-        except Exception as e2:
-            print(f"Error en conversión con audioop: {e2}")
-            raise
+        print(f"Error en conversión de audio: {e}")
+        raise
 
 @app.get("/")
 async def root():
@@ -145,13 +126,30 @@ async def media_stream(ws: WebSocket):
                         voice="es-LA_SofiaV3Voice"
                     ).get_result().content
 
-                    # Convertir respuesta a formato Twilio (μ-law 8kHz)
-                    audio_wav = AudioSegment.from_file(io.BytesIO(audio_reply), format="wav")
-                    audio_wav = audio_wav.set_frame_rate(8000)
-                    audio_wav = audio_wav.set_channels(1)
+                    # Convertir respuesta WAV a μ-law 8kHz para Twilio
+                    # Leer WAV
+                    with wave.open(io.BytesIO(audio_reply), 'rb') as wav_file:
+                        params = wav_file.getparams()
+                        frames = wav_file.readframes(params.nframes)
+                        
+                        # Resamplear a 8kHz si es necesario
+                        if params.framerate != 8000:
+                            frames, _ = audioop.ratecv(
+                                frames,
+                                params.sampwidth,
+                                params.nchannels,
+                                params.framerate,
+                                8000,
+                                None
+                            )
+                        
+                        # Convertir a mono si es necesario
+                        if params.nchannels == 2:
+                            frames = audioop.tomono(frames, params.sampwidth, 1, 1)
+                        
+                        # Convertir a μ-law
+                        mulaw_audio = audioop.lin2ulaw(frames, params.sampwidth)
                     
-                    # Convertir a μ-law
-                    mulaw_audio = audioop.lin2ulaw(audio_wav.raw_data, 2)
                     out_b64 = base64.b64encode(mulaw_audio).decode()
 
                     await ws.send_json({
