@@ -538,13 +538,20 @@ async def media_stream(ws: WebSocket):
 
             elif data["event"] == "stop":
                 print("🔴 Stream stopped")
+                print(f"📊 Mensajes capturados: {len(conversation['messages'])}")
+                print(f"📞 Call SID: {conversation['call_sid']}")
                 
                 # Analizar y subir a DB2 directamente
                 if conversation["messages"]:
                     print(f"✅ Conversación capturada: {len(conversation['messages'])} mensajes")
                     
+                    # Debug: mostrar mensajes
+                    print("\n💬 MENSAJES CAPTURADOS:")
+                    for i, msg in enumerate(conversation["messages"], 1):
+                        print(f"   {i}. {msg['role']}: {msg['content'][:50]}...")
+                    
                     try:
-                        print("\n🤖 Analizando y subiendo a DB2...")
+                        print("\n🤖 Iniciando análisis con Groq...")
                         
                         # Preparar texto
                         conversation_text = ""
@@ -552,9 +559,13 @@ async def media_stream(ws: WebSocket):
                             role = "Usuario" if msg['role'] == 'user' else "Asistente"
                             conversation_text += f"{role}: {msg['content']}\n"
                         
+                        print(f"📝 Texto preparado ({len(conversation_text)} caracteres)")
+                        
                         # Analizar con Groq
                         from groq import Groq
                         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+                        
+                        print("🔄 Llamando a Groq API...")
                         
                         prompt = f"""Analiza esta conversación inmobiliaria y responde SOLO en JSON:
 
@@ -581,18 +592,25 @@ Formato JSON:
                             max_tokens=500
                         )
                         
+                        print("✅ Respuesta de Groq recibida")
+                        
                         result = response.choices[0].message.content.strip()
+                        print(f"📄 Resultado raw: {result[:200]}...")
+                        
                         if result.startswith("```json"):
                             result = result.replace("```json", "").replace("```", "").strip()
                         
                         analysis = json.loads(result)
-                        print(f"✅ Análisis completado: {analysis.get('calificacion_lead', 'N/A')} - Nivel {analysis.get('nivel_interes', 0)}/10")
+                        print(f"✅ JSON parseado correctamente")
+                        print(f"📊 Análisis: {analysis.get('calificacion_lead', 'N/A')} - Nivel {analysis.get('nivel_interes', 0)}/10")
                         
                         # Guardar en DB2
+                        print("\n💾 Conectando a DB2...")
                         from database import connect_to_db2
                         import ibm_db
                         
                         conn = connect_to_db2()
+                        print("✅ Conexión a DB2 establecida")
                         
                         sql = """
                             INSERT INTO analisis_conversaciones 
@@ -601,7 +619,10 @@ Formato JSON:
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                         """
                         
+                        print("🔄 Preparando statement SQL...")
                         stmt = ibm_db.prepare(conn, sql)
+                        
+                        print("🔄 Binding parameters...")
                         ibm_db.bind_param(stmt, 1, conversation["call_sid"])
                         ibm_db.bind_param(stmt, 2, analysis.get('resumen', ''))
                         ibm_db.bind_param(stmt, 3, analysis.get('sentimiento', ''))
@@ -611,20 +632,30 @@ Formato JSON:
                         ibm_db.bind_param(stmt, 7, analysis.get('proximos_pasos', ''))
                         ibm_db.bind_param(stmt, 8, analysis.get('propiedades_mencionadas', ''))
                         
+                        print("🔄 Ejecutando INSERT...")
                         ibm_db.execute(stmt)
+                        
+                        print("🔄 Cerrando conexión...")
                         ibm_db.close(conn)
                         
-                        print(f"✅ Guardado en DB2!")
+                        print(f"✅ ¡Guardado exitosamente en DB2!")
                         
                         if analysis.get('calificacion_lead') == 'caliente':
                             print("\n🔥🔥🔥 LEAD CALIENTE! 🔥🔥🔥")
                             print(f"   📞 Call SID: {conversation['call_sid']}")
                             print(f"   💡 Interés: {analysis.get('interes_cliente', 'N/A')}")
                             
+                    except json.JSONDecodeError as e:
+                        print(f"❌ Error parseando JSON: {e}")
+                        print(f"   Contenido recibido: {result}")
                     except Exception as e:
                         print(f"❌ Error en análisis: {e}")
+                        print(f"   Tipo de error: {type(e).__name__}")
                         import traceback
+                        print("   Traceback completo:")
                         traceback.print_exc()
+                else:
+                    print("⚠️  No hay mensajes para analizar")
                 
                 break
 
