@@ -171,291 +171,11 @@ async def send_greeting(ws, stream_sid):
 async def root():
     return {"status": "server running"}
 
-@app.get("/conversations")
-async def list_conversations(limit: int = 10):
-    """Lista las últimas conversaciones desde DB2"""
-    from database import connect_to_db2
-    import ibm_db
-    
-    conn = connect_to_db2()
-    sql = """
-        SELECT * FROM analisis_conversaciones 
-        ORDER BY fecha_analisis DESC 
-        FETCH FIRST ? ROWS ONLY
-    """
-    stmt = ibm_db.prepare(conn, sql)
-    ibm_db.bind_param(stmt, 1, limit)
-    ibm_db.execute(stmt)
-    
-    conversations = []
-    row = ibm_db.fetch_assoc(stmt)
-    while row:
-        conversations.append(dict(row))
-        row = ibm_db.fetch_assoc(stmt)
-    
-    ibm_db.close(conn)
-    return {"conversations": conversations, "total": len(conversations)}
-
-@app.get("/conversation/{call_sid}")
-async def get_conversation(call_sid: str):
-    """Obtiene una conversación específica desde DB2"""
-    from database import connect_to_db2
-    import ibm_db
-    
-    conn = connect_to_db2()
-    sql = "SELECT * FROM analisis_conversaciones WHERE call_sid = ?"
-    stmt = ibm_db.prepare(conn, sql)
-    ibm_db.bind_param(stmt, 1, call_sid)
-    ibm_db.execute(stmt)
-    
-    row = ibm_db.fetch_assoc(stmt)
-    ibm_db.close(conn)
-    
-    if not row:
-        return {"error": "Conversación no encontrada"}
-    return dict(row)
-
-@app.get("/conversation/{call_sid}/analyze")
-async def analyze_conv(call_sid: str):
-    """Obtiene análisis desde DB2"""
-    from database import connect_to_db2
-    import ibm_db
-    
-    conn = connect_to_db2()
-    sql = "SELECT * FROM analisis_conversaciones WHERE call_sid = ?"
-    stmt = ibm_db.prepare(conn, sql)
-    ibm_db.bind_param(stmt, 1, call_sid)
-    ibm_db.execute(stmt)
-    
-    row = ibm_db.fetch_assoc(stmt)
-    ibm_db.close(conn)
-    
-    if not row:
-        return {"error": "Análisis no encontrado"}
-    return dict(row)
-
-@app.get("/hot-leads")
-async def get_hot_leads(limit: int = 10):
-    """Obtiene leads calientes desde DB2"""
-    from database import connect_to_db2
-    import ibm_db
-    
-    conn = connect_to_db2()
-    sql = """
-        SELECT * FROM leads_calientes 
-        FETCH FIRST ? ROWS ONLY
-    """
-    stmt = ibm_db.prepare(conn, sql)
-    ibm_db.bind_param(stmt, 1, limit)
-    ibm_db.execute(stmt)
-    
-    leads = []
-    row = ibm_db.fetch_assoc(stmt)
-    while row:
-        leads.append(dict(row))
-        row = ibm_db.fetch_assoc(stmt)
-    
-    ibm_db.close(conn)
-    return {"leads": leads, "total": len(leads)}
-
-@app.get("/conversation/{call_sid}/follow-up")
-async def get_follow_up(call_sid: str):
-    """Genera script de seguimiento basado en el análisis"""
-    from database import connect_to_db2
-    import ibm_db
-    from groq import Groq
-    
-    # Obtener análisis
-    conn = connect_to_db2()
-    sql = "SELECT * FROM analisis_conversaciones WHERE call_sid = ?"
-    stmt = ibm_db.prepare(conn, sql)
-    ibm_db.bind_param(stmt, 1, call_sid)
-    ibm_db.execute(stmt)
-    
-    row = ibm_db.fetch_assoc(stmt)
-    ibm_db.close(conn)
-    
-    if not row:
-        return {"error": "Análisis no encontrado"}
-    
-    # Generar script
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    prompt = f"""Genera un mensaje de seguimiento profesional basado en este análisis:
-
-Resumen: {row['RESUMEN']}
-Interés del cliente: {row['INTERES_CLIENTE']}
-Calificación: {row['CALIFICACION_LEAD']}
-Próximos pasos: {row['PROXIMOS_PASOS']}
-
-Genera un mensaje corto (3-4 líneas) en español para WhatsApp o email."""
-
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "Eres experto en seguimiento de ventas inmobiliarias."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.7,
-        max_tokens=200
-    )
-    
-    script = response.choices[0].message.content.strip()
-    return {"script": script}
-
-@app.get("/stats")
-async def get_stats(days: int = 7):
-    """Obtiene estadísticas desde DB2"""
-    from database import connect_to_db2
-    import ibm_db
-    
-    conn = connect_to_db2()
-    sql = """
-        SELECT 
-            COUNT(*) as total,
-            COUNT(CASE WHEN calificacion_lead = 'caliente' THEN 1 END) as calientes,
-            COUNT(CASE WHEN calificacion_lead = 'tibio' THEN 1 END) as tibios,
-            COUNT(CASE WHEN calificacion_lead = 'frio' THEN 1 END) as frios,
-            AVG(nivel_interes) as interes_promedio
-        FROM analisis_conversaciones
-        WHERE fecha_analisis >= CURRENT_DATE - ? DAYS
-    """
-    stmt = ibm_db.prepare(conn, sql)
-    ibm_db.bind_param(stmt, 1, days)
-    ibm_db.execute(stmt)
-    
-    row = ibm_db.fetch_assoc(stmt)
-    ibm_db.close(conn)
-    
-    if row:
-        return dict(row)
-    return {"error": "No hay datos"}
-
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
     host = request.url.hostname
     xml = twiml_response(host)
     return HTMLResponse(content=xml, media_type="application/xml")
-
-async def process_and_save_conversation(conversation):
-    """
-    Función auxiliar para procesar y guardar la conversación
-    """
-    if not conversation["messages"]:
-        print("⚠️  No hay mensajes para analizar")
-        return
-    
-    print(f"\n✅ Conversación capturada: {len(conversation['messages'])} mensajes")
-    
-    # Debug: mostrar mensajes
-    print("\n💬 MENSAJES CAPTURADOS:")
-    for i, msg in enumerate(conversation["messages"], 1):
-        print(f"   {i}. {msg['role']}: {msg['content'][:50]}...")
-    
-    try:
-        print("\n🤖 Iniciando análisis con Groq...")
-        
-        # Preparar texto
-        conversation_text = ""
-        for msg in conversation["messages"]:
-            role = "Usuario" if msg['role'] == 'user' else "Asistente"
-            conversation_text += f"{role}: {msg['content']}\n"
-        
-        print(f"📝 Texto preparado ({len(conversation_text)} caracteres)")
-        
-        # Analizar con Groq
-        from groq import Groq
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        
-        print("🔄 Llamando a Groq API...")
-        
-        prompt = f"""Analiza esta conversación inmobiliaria y responde SOLO en JSON:
-
-{conversation_text}
-
-Formato JSON:
-{{
-  "resumen": "resumen breve en 1-2 oraciones",
-  "sentimiento": "positivo/neutral/negativo",
-  "interes_cliente": "qué busca el cliente",
-  "nivel_interes": 5,
-  "calificacion_lead": "caliente/tibio/frio",
-  "proximos_pasos": "acciones recomendadas",
-  "propiedades_mencionadas": "propiedades discutidas"
-}}"""
-
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "Eres analista de ventas. Respondes solo JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=500
-        )
-        
-        print("✅ Respuesta de Groq recibida")
-        
-        result = response.choices[0].message.content.strip()
-        print(f"📄 Resultado raw: {result[:200]}...")
-        
-        if result.startswith("```json"):
-            result = result.replace("```json", "").replace("```", "").strip()
-        
-        analysis = json.loads(result)
-        print(f"✅ JSON parseado correctamente")
-        print(f"📊 Análisis: {analysis.get('calificacion_lead', 'N/A')} - Nivel {analysis.get('nivel_interes', 0)}/10")
-        
-        # Guardar en DB2
-        print("\n💾 Conectando a DB2...")
-        from database import connect_to_db2
-        import ibm_db
-        
-        conn = connect_to_db2()
-        print("✅ Conexión a DB2 establecida")
-        
-        sql = """
-            INSERT INTO analisis_conversaciones 
-            (call_sid, resumen, sentimiento, interes_cliente, nivel_interes, 
-             calificacion_lead, proximos_pasos, propiedades_mencionadas, fecha_analisis)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """
-        
-        print("🔄 Preparando statement SQL...")
-        stmt = ibm_db.prepare(conn, sql)
-        
-        print("🔄 Binding parameters...")
-        ibm_db.bind_param(stmt, 1, conversation["call_sid"])
-        ibm_db.bind_param(stmt, 2, analysis.get('resumen', ''))
-        ibm_db.bind_param(stmt, 3, analysis.get('sentimiento', ''))
-        ibm_db.bind_param(stmt, 4, analysis.get('interes_cliente', ''))
-        ibm_db.bind_param(stmt, 5, analysis.get('nivel_interes', 5))
-        ibm_db.bind_param(stmt, 6, analysis.get('calificacion_lead', 'tibio'))
-        ibm_db.bind_param(stmt, 7, analysis.get('proximos_pasos', ''))
-        ibm_db.bind_param(stmt, 8, analysis.get('propiedades_mencionadas', ''))
-        
-        print("🔄 Ejecutando INSERT...")
-        ibm_db.execute(stmt)
-        
-        print("🔄 Cerrando conexión...")
-        ibm_db.close(conn)
-        
-        print(f"✅ ¡Guardado exitosamente en DB2!")
-        
-        if analysis.get('calificacion_lead') == 'caliente':
-            print("\n🔥🔥🔥 LEAD CALIENTE! 🔥🔥🔥")
-            print(f"   📞 Call SID: {conversation['call_sid']}")
-            print(f"   💡 Interés: {analysis.get('interes_cliente', 'N/A')}")
-            
-    except json.JSONDecodeError as e:
-        print(f"❌ Error parseando JSON: {e}")
-        print(f"   Contenido recibido: {result}")
-    except Exception as e:
-        print(f"❌ Error en análisis: {e}")
-        print(f"   Tipo de error: {type(e).__name__}")
-        import traceback
-        print("   Traceback completo:")
-        traceback.print_exc()
-
 
 @app.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
@@ -468,13 +188,7 @@ async def media_stream(ws: WebSocket):
     is_speaking = False
     chunks_received = 0
     has_greeted = False
-    last_response_time = 0
-    
-    # Almacenar conversación en memoria
-    conversation = {
-        "call_sid": None,
-        "messages": []
-    }  # Para evitar respuestas repetidas
+    last_response_time = 0  # Para evitar respuestas repetidas
 
     try:
         while True:
@@ -488,7 +202,6 @@ async def media_stream(ws: WebSocket):
             
             elif data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
-                conversation["call_sid"] = stream_sid
                 print(f"🔵 Stream started: {stream_sid}")
                 
                 # Verificar configuración del stream
@@ -610,13 +323,6 @@ async def media_stream(ws: WebSocket):
                         
                     print(f"💬 User: {text}")
                     
-                    # Guardar mensaje del usuario en memoria
-                    conversation["messages"].append({
-                        "role": "user",
-                        "content": text,
-                        "confidence": confidence
-                    })
-                    
                     # Evitar procesar lo mismo dos veces
                     current_time = time.time()
                     if last_response_time > 0 and current_time - last_response_time < 5:
@@ -634,12 +340,6 @@ async def media_stream(ws: WebSocket):
                     # Agent (Groq)
                     reply = agent_reply(text)
                     print(f"🤖 Agent: {reply}")
-                    
-                    # Guardar respuesta del asistente en memoria
-                    conversation["messages"].append({
-                        "role": "assistant",
-                        "content": reply
-                    })
 
                     # Enviar respuesta de audio (esto ya incluye el delay)
                     await send_audio_to_twilio(ws, stream_sid, reply)
@@ -658,33 +358,10 @@ async def media_stream(ws: WebSocket):
                     continue
 
             elif data["event"] == "stop":
-                print("🔴 Stream stopped (evento STOP recibido)")
-                print(f"📊 Mensajes capturados: {len(conversation['messages'])}")
-                print(f"📞 Call SID: {conversation['call_sid']}")
-                
-                # Procesar conversación
-                await process_and_save_conversation(conversation)
+                print("🔴 Stream stopped")
                 break
 
     except WebSocketDisconnect:
-        print("❌ Client disconnected (WebSocket cerrado)")
-        print(f"📊 Mensajes al desconectar: {len(conversation['messages'])}")
-        
-        # Procesar conversación aunque no se reciba el evento "stop"
-        if conversation["messages"]:
-            print("💾 Procesando conversación antes de cerrar...")
-            await process_and_save_conversation(conversation)
-        else:
-            print("⚠️  No hay mensajes para guardar")
-            
+        print("❌ Client disconnected.")
     except Exception as e:
         print(f"❌ Error en websocket: {e}")
-        print(f"📊 Mensajes al momento del error: {len(conversation['messages'])}")
-        
-        # Intentar guardar lo que se tenga
-        if conversation["messages"]:
-            print("💾 Intentando guardar conversación parcial...")
-            try:
-                await process_and_save_conversation(conversation)
-            except Exception as e2:
-                print(f"❌ No se pudo guardar: {e2}")
