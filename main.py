@@ -336,6 +336,127 @@ async def incoming_call(request: Request):
     xml = twiml_response(host)
     return HTMLResponse(content=xml, media_type="application/xml")
 
+async def process_and_save_conversation(conversation):
+    """
+    Función auxiliar para procesar y guardar la conversación
+    """
+    if not conversation["messages"]:
+        print("⚠️  No hay mensajes para analizar")
+        return
+    
+    print(f"\n✅ Conversación capturada: {len(conversation['messages'])} mensajes")
+    
+    # Debug: mostrar mensajes
+    print("\n💬 MENSAJES CAPTURADOS:")
+    for i, msg in enumerate(conversation["messages"], 1):
+        print(f"   {i}. {msg['role']}: {msg['content'][:50]}...")
+    
+    try:
+        print("\n🤖 Iniciando análisis con Groq...")
+        
+        # Preparar texto
+        conversation_text = ""
+        for msg in conversation["messages"]:
+            role = "Usuario" if msg['role'] == 'user' else "Asistente"
+            conversation_text += f"{role}: {msg['content']}\n"
+        
+        print(f"📝 Texto preparado ({len(conversation_text)} caracteres)")
+        
+        # Analizar con Groq
+        from groq import Groq
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        
+        print("🔄 Llamando a Groq API...")
+        
+        prompt = f"""Analiza esta conversación inmobiliaria y responde SOLO en JSON:
+
+{conversation_text}
+
+Formato JSON:
+{{
+  "resumen": "resumen breve en 1-2 oraciones",
+  "sentimiento": "positivo/neutral/negativo",
+  "interes_cliente": "qué busca el cliente",
+  "nivel_interes": 5,
+  "calificacion_lead": "caliente/tibio/frio",
+  "proximos_pasos": "acciones recomendadas",
+  "propiedades_mencionadas": "propiedades discutidas"
+}}"""
+
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "Eres analista de ventas. Respondes solo JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=500
+        )
+        
+        print("✅ Respuesta de Groq recibida")
+        
+        result = response.choices[0].message.content.strip()
+        print(f"📄 Resultado raw: {result[:200]}...")
+        
+        if result.startswith("```json"):
+            result = result.replace("```json", "").replace("```", "").strip()
+        
+        analysis = json.loads(result)
+        print(f"✅ JSON parseado correctamente")
+        print(f"📊 Análisis: {analysis.get('calificacion_lead', 'N/A')} - Nivel {analysis.get('nivel_interes', 0)}/10")
+        
+        # Guardar en DB2
+        print("\n💾 Conectando a DB2...")
+        from database import connect_to_db2
+        import ibm_db
+        
+        conn = connect_to_db2()
+        print("✅ Conexión a DB2 establecida")
+        
+        sql = """
+            INSERT INTO analisis_conversaciones 
+            (call_sid, resumen, sentimiento, interes_cliente, nivel_interes, 
+             calificacion_lead, proximos_pasos, propiedades_mencionadas, fecha_analisis)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """
+        
+        print("🔄 Preparando statement SQL...")
+        stmt = ibm_db.prepare(conn, sql)
+        
+        print("🔄 Binding parameters...")
+        ibm_db.bind_param(stmt, 1, conversation["call_sid"])
+        ibm_db.bind_param(stmt, 2, analysis.get('resumen', ''))
+        ibm_db.bind_param(stmt, 3, analysis.get('sentimiento', ''))
+        ibm_db.bind_param(stmt, 4, analysis.get('interes_cliente', ''))
+        ibm_db.bind_param(stmt, 5, analysis.get('nivel_interes', 5))
+        ibm_db.bind_param(stmt, 6, analysis.get('calificacion_lead', 'tibio'))
+        ibm_db.bind_param(stmt, 7, analysis.get('proximos_pasos', ''))
+        ibm_db.bind_param(stmt, 8, analysis.get('propiedades_mencionadas', ''))
+        
+        print("🔄 Ejecutando INSERT...")
+        ibm_db.execute(stmt)
+        
+        print("🔄 Cerrando conexión...")
+        ibm_db.close(conn)
+        
+        print(f"✅ ¡Guardado exitosamente en DB2!")
+        
+        if analysis.get('calificacion_lead') == 'caliente':
+            print("\n🔥🔥🔥 LEAD CALIENTE! 🔥🔥🔥")
+            print(f"   📞 Call SID: {conversation['call_sid']}")
+            print(f"   💡 Interés: {analysis.get('interes_cliente', 'N/A')}")
+            
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parseando JSON: {e}")
+        print(f"   Contenido recibido: {result}")
+    except Exception as e:
+        print(f"❌ Error en análisis: {e}")
+        print(f"   Tipo de error: {type(e).__name__}")
+        import traceback
+        print("   Traceback completo:")
+        traceback.print_exc()
+
+
 @app.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
     await ws.accept()
@@ -537,129 +658,33 @@ async def media_stream(ws: WebSocket):
                     continue
 
             elif data["event"] == "stop":
-                print("🔴 Stream stopped")
+                print("🔴 Stream stopped (evento STOP recibido)")
                 print(f"📊 Mensajes capturados: {len(conversation['messages'])}")
                 print(f"📞 Call SID: {conversation['call_sid']}")
                 
-                # Analizar y subir a DB2 directamente
-                if conversation["messages"]:
-                    print(f"✅ Conversación capturada: {len(conversation['messages'])} mensajes")
-                    
-                    # Debug: mostrar mensajes
-                    print("\n💬 MENSAJES CAPTURADOS:")
-                    for i, msg in enumerate(conversation["messages"], 1):
-                        print(f"   {i}. {msg['role']}: {msg['content'][:50]}...")
-                    
-                    try:
-                        print("\n🤖 Iniciando análisis con Groq...")
-                        
-                        # Preparar texto
-                        conversation_text = ""
-                        for msg in conversation["messages"]:
-                            role = "Usuario" if msg['role'] == 'user' else "Asistente"
-                            conversation_text += f"{role}: {msg['content']}\n"
-                        
-                        print(f"📝 Texto preparado ({len(conversation_text)} caracteres)")
-                        
-                        # Analizar con Groq
-                        from groq import Groq
-                        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-                        
-                        print("🔄 Llamando a Groq API...")
-                        
-                        prompt = f"""Analiza esta conversación inmobiliaria y responde SOLO en JSON:
-
-{conversation_text}
-
-Formato JSON:
-{{
-  "resumen": "resumen breve en 1-2 oraciones",
-  "sentimiento": "positivo/neutral/negativo",
-  "interes_cliente": "qué busca el cliente",
-  "nivel_interes": 5,
-  "calificacion_lead": "caliente/tibio/frio",
-  "proximos_pasos": "acciones recomendadas",
-  "propiedades_mencionadas": "propiedades discutidas"
-}}"""
-
-                        response = client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=[
-                                {"role": "system", "content": "Eres analista de ventas. Respondes solo JSON."},
-                                {"role": "user", "content": prompt}
-                            ],
-                            temperature=0.3,
-                            max_tokens=500
-                        )
-                        
-                        print("✅ Respuesta de Groq recibida")
-                        
-                        result = response.choices[0].message.content.strip()
-                        print(f"📄 Resultado raw: {result[:200]}...")
-                        
-                        if result.startswith("```json"):
-                            result = result.replace("```json", "").replace("```", "").strip()
-                        
-                        analysis = json.loads(result)
-                        print(f"✅ JSON parseado correctamente")
-                        print(f"📊 Análisis: {analysis.get('calificacion_lead', 'N/A')} - Nivel {analysis.get('nivel_interes', 0)}/10")
-                        
-                        # Guardar en DB2
-                        print("\n💾 Conectando a DB2...")
-                        from database import connect_to_db2
-                        import ibm_db
-                        
-                        conn = connect_to_db2()
-                        print("✅ Conexión a DB2 establecida")
-                        
-                        sql = """
-                            INSERT INTO analisis_conversaciones 
-                            (call_sid, resumen, sentimiento, interes_cliente, nivel_interes, 
-                             calificacion_lead, proximos_pasos, propiedades_mencionadas, fecha_analisis)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        """
-                        
-                        print("🔄 Preparando statement SQL...")
-                        stmt = ibm_db.prepare(conn, sql)
-                        
-                        print("🔄 Binding parameters...")
-                        ibm_db.bind_param(stmt, 1, conversation["call_sid"])
-                        ibm_db.bind_param(stmt, 2, analysis.get('resumen', ''))
-                        ibm_db.bind_param(stmt, 3, analysis.get('sentimiento', ''))
-                        ibm_db.bind_param(stmt, 4, analysis.get('interes_cliente', ''))
-                        ibm_db.bind_param(stmt, 5, analysis.get('nivel_interes', 5))
-                        ibm_db.bind_param(stmt, 6, analysis.get('calificacion_lead', 'tibio'))
-                        ibm_db.bind_param(stmt, 7, analysis.get('proximos_pasos', ''))
-                        ibm_db.bind_param(stmt, 8, analysis.get('propiedades_mencionadas', ''))
-                        
-                        print("🔄 Ejecutando INSERT...")
-                        ibm_db.execute(stmt)
-                        
-                        print("🔄 Cerrando conexión...")
-                        ibm_db.close(conn)
-                        
-                        print(f"✅ ¡Guardado exitosamente en DB2!")
-                        
-                        if analysis.get('calificacion_lead') == 'caliente':
-                            print("\n🔥🔥🔥 LEAD CALIENTE! 🔥🔥🔥")
-                            print(f"   📞 Call SID: {conversation['call_sid']}")
-                            print(f"   💡 Interés: {analysis.get('interes_cliente', 'N/A')}")
-                            
-                    except json.JSONDecodeError as e:
-                        print(f"❌ Error parseando JSON: {e}")
-                        print(f"   Contenido recibido: {result}")
-                    except Exception as e:
-                        print(f"❌ Error en análisis: {e}")
-                        print(f"   Tipo de error: {type(e).__name__}")
-                        import traceback
-                        print("   Traceback completo:")
-                        traceback.print_exc()
-                else:
-                    print("⚠️  No hay mensajes para analizar")
-                
+                # Procesar conversación
+                await process_and_save_conversation(conversation)
                 break
 
     except WebSocketDisconnect:
-        print("❌ Client disconnected.")
+        print("❌ Client disconnected (WebSocket cerrado)")
+        print(f"📊 Mensajes al desconectar: {len(conversation['messages'])}")
+        
+        # Procesar conversación aunque no se reciba el evento "stop"
+        if conversation["messages"]:
+            print("💾 Procesando conversación antes de cerrar...")
+            await process_and_save_conversation(conversation)
+        else:
+            print("⚠️  No hay mensajes para guardar")
+            
     except Exception as e:
         print(f"❌ Error en websocket: {e}")
+        print(f"📊 Mensajes al momento del error: {len(conversation['messages'])}")
+        
+        # Intentar guardar lo que se tenga
+        if conversation["messages"]:
+            print("💾 Intentando guardar conversación parcial...")
+            try:
+                await process_and_save_conversation(conversation)
+            except Exception as e2:
+                print(f"❌ No se pudo guardar: {e2}")
