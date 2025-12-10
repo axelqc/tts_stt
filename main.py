@@ -360,7 +360,7 @@ async def media_stream(ws: WebSocket):
             msg = await ws.receive_text()
             data = json.loads(msg)
             
-            print(f"📨 Evento recibido: {data['event']}")
+            #print(f"📨 Evento recibido: {data['event']}")
 
             if data["event"] == "connected":
                 print("🔗 WebSocket conectado con Twilio")
