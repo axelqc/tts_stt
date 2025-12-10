@@ -6,6 +6,11 @@ def twiml_response(host):
     """
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+    <Start>
+        <Recordings>
+            <Recording track="both" />
+        </Recordings>
+    </Start>
     <Say language="es-MX">Conectando, por favor espera.</Say>
     <Connect>
         <Stream url="wss://{host}/media-stream" track="inbound_track" />
