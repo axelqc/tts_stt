@@ -1,4 +1,4 @@
-# main.py - Versión optimizada con grabación integrada
+# main.py - Versión COMPLETA con todos los endpoints y grabación
 
 import os
 import json
@@ -45,8 +45,8 @@ DUPLICATE_RESPONSE_THRESHOLD = 3
 WEBSOCKET_PING_INTERVAL = 10
 
 # Parámetros de buffer y detección de silencio
-MIN_BUFFER_SIZE = 16000
-MAX_BUFFER_SIZE = 64000
+MIN_BUFFER_SIZE = 16000  # 2 segundos
+MAX_BUFFER_SIZE = 64000  # 8 segundos
 SILENCE_THRESHOLD = 200
 SILENCE_DURATION = 0.8
 SILENCE_CHUNKS = int((SILENCE_DURATION * 8000) / 160)
@@ -254,10 +254,36 @@ async def agent_reply_async(text: str, timeout: int = AGENT_TIMEOUT) -> str:
         return "Lo siento, ha ocurrido un error. ¿Podrías intentarlo de nuevo?"
 
 
+# ========================================
+# HTTP ENDPOINTS
+# ========================================
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "service": "twilio-voice-bot",
+        "timestamp": time.time()
+    }
+
+
+@app.post("/incoming-call")
+async def incoming_call(request: Request):
+    """Endpoint que Twilio llama cuando hay una llamada entrante"""
+    host = request.url.hostname
+    logger.info(f"📞 Llamada entrante desde host: {host}")
+    xml = twiml_response(host)
+    return HTMLResponse(content=xml, media_type="application/xml")
+
+
 @app.post("/voice")
 async def voice_webhook(request: Request):
-    """Webhook para iniciar llamada con Twilio"""
-    return twiml_response()
+    """Webhook alternativo para iniciar llamada con Twilio"""
+    host = request.url.hostname
+    logger.info(f"📞 Voice webhook desde host: {host}")
+    xml = twiml_response(host)
+    return HTMLResponse(content=xml, media_type="application/xml")
 
 
 @app.post("/recording-status")
@@ -267,11 +293,13 @@ async def recording_status(
     RecordingStatus: str = Form(...),
     CallSid: str = Form(...)
 ):
-    """Callback cuando Twilio termina una grabación"""
-    logger.info(f"📼 Recording status: {RecordingStatus}")
+    """Callback cuando Twilio termina una grabación (backup de Twilio)"""
+    logger.info(f"📼 Twilio Recording status: {RecordingStatus}")
     
     if RecordingStatus == "completed":
-        logger.info(f"✅ Grabación completada: {RecordingUrl}")
+        logger.info(f"✅ Twilio grabación completada: {RecordingUrl}")
+        logger.info(f"   CallSID: {CallSid}")
+        logger.info(f"   RecordingSID: {RecordingSid}")
         
     elif RecordingStatus == "absent":
         logger.warning(f"⚠️ Grabación ausente para call {CallSid}")
@@ -285,6 +313,10 @@ async def recording_status(
         "call_sid": CallSid
     }
 
+
+# ========================================
+# WEBSOCKET
+# ========================================
 
 async def keep_alive(ws: WebSocket, interval: int = WEBSOCKET_PING_INTERVAL):
     """Mantiene la conexión WebSocket activa"""
@@ -306,9 +338,9 @@ async def media_stream(ws: WebSocket):
     await ws.accept()
     logger.info("✅ Client connected.")
 
-    # ✅ PASO 2: Declarar variables de estado (agregar call_sid y recorder)
+    # Estado de la sesión
     stream_sid = None
-    call_sid = None  # 🔴 NUEVO
+    call_sid = None
     audio_buffer = b""
     is_speaking = False
     chunks_received = 0
@@ -318,7 +350,7 @@ async def media_stream(ws: WebSocket):
     consecutive_silence_chunks = 0
     has_speech = False
     
-    recorder = None  # 🔴 NUEVO: Instancia del grabador
+    recorder = None  # Instancia del grabador con Cloudinary
     
     keep_alive_task = asyncio.create_task(keep_alive(ws))
 
@@ -350,14 +382,13 @@ async def media_stream(ws: WebSocket):
             
             elif data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
-                call_sid = data["start"]["callSid"]  # 🔴 NUEVO: Obtener call_sid
+                call_sid = data["start"]["callSid"]
                 logger.info(f"🔵 Stream: {stream_sid}, Call: {call_sid}")
                 
                 media_format = data["start"].get("mediaFormat", {})
                 logger.info(f"📋 Format: {json.dumps(media_format, indent=2)}")
                 
-                # ✅ PASO 3: Iniciar grabación aquí
-                # 🔴 NUEVO: Crear instancia del grabador
+                # 🎬 Iniciar grabación con Cloudinary
                 try:
                     storage_type = os.getenv("RECORDING_STORAGE", "local")
                     recorder = CallRecorder(call_sid, storage_type=storage_type)
@@ -390,8 +421,7 @@ async def media_stream(ws: WebSocket):
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
                 
-                # ✅ PASO 4: Grabar cada chunk de audio recibido
-                # 🔴 NUEVO: Agregar audio al grabador
+                # 🎬 Grabar cada chunk recibido
                 if recorder and recorder.is_recording:
                     try:
                         recorder.add_audio_chunk(audio_bytes)
@@ -523,14 +553,13 @@ async def media_stream(ws: WebSocket):
             elif data["event"] == "stop":
                 logger.info("🔴 Stream stopped")
                 
-                # ✅ PASO 5: Finalizar y subir grabación cuando termina la llamada
-                # 🔴 NUEVO: Guardar grabación
+                # 🎬 Finalizar y subir grabación
                 if recorder and recorder.is_recording:
                     logger.info("💾 Finalizando grabación...")
                     try:
                         recording_url = await recorder.finalize()
                         if recording_url:
-                            logger.info(f"🎬 ✅ Grabación disponible: {recording_url}")
+                            logger.info(f"🎬 ✅ Grabación Cloudinary disponible: {recording_url}")
                         else:
                             logger.warning("⚠️ No se pudo guardar la grabación")
                     except Exception as e:
@@ -545,8 +574,7 @@ async def media_stream(ws: WebSocket):
         import traceback
         traceback.print_exc()
     finally:
-        # ✅ PASO 6: Asegurar que se guarde la grabación incluso si hay error
-        # 🔴 NUEVO: Guardar grabación en caso de cierre inesperado
+        # 🎬 Backup: Guardar grabación en caso de cierre inesperado
         if recorder and recorder.is_recording:
             logger.info("💾 Guardando grabación por cierre inesperado...")
             try:
