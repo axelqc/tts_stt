@@ -23,6 +23,39 @@ PROPERTIES = [
         "banos": 2,
         "area": 150,
         "keywords": ["veracruz", "familia", "familiar", "niños", "infantil", "deportiva", "casa club", "privada", "seguro", "tranquilo"]
+    },
+    {
+        "id": 3,
+        "nombre": "Residencial Vista Hermosa",
+        "descripcion": "Exclusivo desarrollo residencial con acabados de lujo, áreas verdes y seguridad las 24 horas. Diseño moderno con espacios amplios y luminosos.",
+        "ubicacion": "Tijuana, Baja California",
+        "precio": 3500000,
+        "cuartos": 3,
+        "banos": 2,
+        "area": 180,
+        "keywords": ["tijuana", "baja california", "lujo", "residencial", "seguridad", "moderno", "áreas verdes", "exclusivo"]
+    },
+    {
+        "id": 4,
+        "nombre": "Villas del Mar",
+        "descripcion": "Desarrollo costero con vista al océano. Acceso privado a la playa, club de playa exclusivo y arquitectura contemporánea.",
+        "ubicacion": "Cancún, Quintana Roo",
+        "precio": 8500000,
+        "cuartos": 4,
+        "banos": 3,
+        "area": 250,
+        "keywords": ["cancún", "quintana roo", "playa", "costa", "océano", "mar", "club de playa", "vista al mar", "contemporáneo", "lujo"]
+    },
+    {
+        "id": 5,
+        "nombre": "Sky Residences",
+        "descripcion": "Lujo en altura con vistas panorámicas de la ciudad. Penthouse disponibles con terrazas amplias y acabados premium.",
+        "ubicacion": "Monterrey, Nuevo León",
+        "precio": 6500000,
+        "cuartos": 3,
+        "banos": 3,
+        "area": 200,
+        "keywords": ["monterrey", "nuevo león", "penthouse", "lujo", "vistas", "panorámicas", "terraza", "premium", "ciudad", "altura"]
     }
 ]
 
