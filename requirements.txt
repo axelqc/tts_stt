@@ -13,3 +13,5 @@ ibm-db
 ibm-db-sa
 sqlalchemy
 python-multipart
+httpx
+cloudinary
