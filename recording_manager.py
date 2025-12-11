@@ -243,19 +243,3 @@ class CallRecorder:
             logger.info(f"📁 Grabación guardada localmente: {filepath}")
             return filepath
 
-
-# Ejemplo de uso en main.py:
-"""
-# Al inicio del websocket
-recorder = CallRecorder(call_sid="CS123", storage_type="cloudinary")
-recorder.start_recording()
-
-# En cada chunk de audio recibido:
-if data["event"] == "media":
-    audio_bytes = base64.b64decode(data["media"]["payload"])
-    recorder.add_audio_chunk(audio_bytes)
-
-# Al finalizar la llamada:
-recording_url = await recorder.finalize()
-logger.info(f"Grabación disponible en: {recording_url}")
-"""
