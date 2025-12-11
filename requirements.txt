@@ -13,5 +13,5 @@ ibm-db
 ibm-db-sa
 sqlalchemy
 python-multipart
-httpx
-cloudinary
+httpx>=0.24.0
+cloudinary>=1.36.0
