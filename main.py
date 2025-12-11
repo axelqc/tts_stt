@@ -1,6 +1,4 @@
 # main.py
-# FastAPI server integrating Twilio Media Streams + IBM STT/TTS + Groq LLM
-# VERSIÓN REFACTORIZADA - Anti-cuelgues con timeouts y manejo robusto de errores
 
 import os
 import json
@@ -13,7 +11,7 @@ import time
 import logging
 from functools import partial
 from typing import Optional
-from fastapi import FastAPI, WebSocket, Request
+from fastapi import FastAPI, WebSocket, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
 from dotenv import load_dotenv
@@ -211,88 +209,70 @@ async def recognize_with_timeout(pcm_audio, timeout=STT_TIMEOUT) -> Optional[dic
     
     # Modelos de español en orden de preferencia
     spanish_models = [
-        "es-MX_BroadbandModel",  # Español México (mejor para Latinoamérica)
-        "es-ES_BroadbandModel",   # Español España
-        "es-LA_BroadbandModel",   # Español Latinoamérica
+        "es-MX_BroadbandModel",
+        "es-ES_BroadbandModel", 
+        "es-LA_BroadbandModel"
     ]
     
     for model in spanish_models:
         try:
-            logger.info(f"🔄 Intentando STT con modelo {model}...")
+            logger.info(f"🔍 Intentando reconocimiento con modelo: {model}")
             
             result = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: stt.recognize(
+                    partial(
+                        stt.recognize,
                         audio=pcm_audio,
-                        content_type="audio/l16; rate=16000",
-                        model=model
-                    ).get_result()
+                        content_type="audio/l16;rate=16000;channels=1",
+                        model=model,
+                        max_alternatives=1,
+                        smart_formatting=True
+                    )
                 ),
                 timeout=timeout
             )
             
-            logger.info(f"✅ STT exitoso con modelo {model}")
-            return result
+            result_dict = result.get_result()
+            logger.info(f"✅ Reconocimiento exitoso con {model}")
+            return result_dict
             
         except asyncio.TimeoutError:
-            logger.error(f"⏱️ Timeout en STT con modelo {model}")
+            logger.warning(f"⏱️ Timeout con modelo {model}, intentando siguiente...")
             continue
         except Exception as e:
-            logger.warning(f"⚠️ Modelo {model} falló: {e}")
+            logger.warning(f"⚠️ Error con modelo {model}: {e}")
             continue
     
-    # Si todos los modelos fallan, intentar con default
-    try:
-        logger.info("🔄 Intentando STT con modelo default...")
-        result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: stt.recognize(
-                    audio=pcm_audio,
-                    content_type="audio/l16; rate=16000"
-                ).get_result()
-            ),
-            timeout=timeout
-        )
-        logger.info("✅ STT exitoso con modelo default")
-        return result
-    except Exception as e:
-        logger.error(f"❌ STT falló completamente: {e}")
-        return None
+    logger.error("❌ Todos los modelos de STT fallaron")
+    return None
 
 
 async def agent_reply_async(text: str, timeout=AGENT_TIMEOUT) -> str:
     """
     Wrapper asíncrono para agent_reply con timeout
     """
-    loop = asyncio.get_event_loop()
-    
     try:
+        loop = asyncio.get_event_loop()
         reply = await asyncio.wait_for(
             loop.run_in_executor(None, agent_reply, text),
             timeout=timeout
         )
         return reply
     except asyncio.TimeoutError:
-        logger.error("⏱️ Timeout en agent_reply")
-        return "Disculpa, ¿puedes repetir? No procesé bien tu mensaje."
+        logger.error(f"⏱️ Timeout obteniendo respuesta del agente")
+        return "Lo siento, tardé demasiado en procesar tu pregunta. ¿Podrías repetir?"
     except Exception as e:
-        logger.error(f"❌ Error en agent_reply: {e}")
-        return "Lo siento, tuve un problema técnico. ¿Podrías repetir?"
+        logger.error(f"❌ Error obteniendo respuesta del agente: {e}")
+        return "Disculpa, tuve un problema procesando tu pregunta. ¿Puedes intentar de nuevo?"
 
+
+# ============================================
+# ENDPOINTS
+# ============================================
 
 @app.get("/")
 async def root():
-    return {
-        "status": "server running",
-        "timestamp": time.time()
-    }
-
-
-@app.get("/health")
-async def health():
-    """Healthcheck para Render"""
     return {
         "status": "ok",
         "service": "twilio-voice-bot",
@@ -305,6 +285,61 @@ async def incoming_call(request: Request):
     host = request.url.hostname
     xml = twiml_response(host)
     return HTMLResponse(content=xml, media_type="application/xml")
+
+
+@app.post("/recording-status")
+async def recording_status(
+    RecordingSid: str = Form(...),
+    RecordingUrl: Optional[str] = Form(None),
+    RecordingStatus: str = Form(...),
+    RecordingDuration: Optional[str] = Form(None),
+    CallSid: str = Form(...),
+    AccountSid: Optional[str] = Form(None)
+):
+    """
+    Endpoint que recibe notificaciones sobre el estado de las grabaciones de Twilio.
+    Este endpoint se ejecuta incluso si la instancia se cae durante la llamada.
+    """
+    logger.info(f"📹 Recording status callback recibido:")
+    logger.info(f"   - Recording SID: {RecordingSid}")
+    logger.info(f"   - Status: {RecordingStatus}")
+    logger.info(f"   - Call SID: {CallSid}")
+    logger.info(f"   - Duration: {RecordingDuration}s")
+    
+    if RecordingStatus == "completed" and RecordingUrl:
+        # La grabación está disponible
+        recording_url = f"{RecordingUrl}.mp3"
+        logger.info(f"✅ Grabación completada y disponible en: {recording_url}")
+        
+        # AQUÍ puedes agregar lógica adicional:
+        # - Descargar la grabación
+        # - Subirla a tu storage (S3, Google Cloud Storage, etc.)
+        # - Guardar metadata en base de datos
+        # - Enviar notificación
+        
+        # Ejemplo: guardar en base de datos (descomentar si tienes DB)
+        # await save_recording_to_db(
+        #     call_sid=CallSid,
+        #     recording_sid=RecordingSid,
+        #     recording_url=recording_url,
+        #     duration=RecordingDuration
+        # )
+        
+    elif RecordingStatus == "in-progress":
+        logger.info(f"🔴 Grabación en progreso para call {CallSid}")
+        
+    elif RecordingStatus == "absent":
+        logger.warning(f"⚠️ Grabación ausente para call {CallSid}")
+        
+    elif RecordingStatus == "failed":
+        logger.error(f"❌ Grabación falló para call {CallSid}")
+    
+    # Twilio espera una respuesta 200
+    return {
+        "status": "received",
+        "recording_sid": RecordingSid,
+        "call_sid": CallSid
+    }
 
 
 @app.websocket("/media-stream")
@@ -506,4 +541,3 @@ async def media_stream(ws: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
