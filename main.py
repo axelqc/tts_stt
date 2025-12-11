@@ -19,7 +19,6 @@ from agent import agent_reply
 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_watson import SpeechToTextV1, TextToSpeechV1
 from twiml import twiml_response
-# ✅ PASO 1: Importar el grabador
 from recording_manager import CallRecorder
 
 # Configurar logging
