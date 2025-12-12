@@ -1,4 +1,4 @@
-# main.py - Versión CORREGIDA para evitar cortes y cuelgues
+# main.py - Versión FINAL CORREGIDA
 
 import os
 import json
@@ -12,13 +12,12 @@ import logging
 from functools import partial
 from typing import Optional
 from fastapi import FastAPI, WebSocket, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.websockets import WebSocketDisconnect
 from dotenv import load_dotenv
 from agent import agent_reply
 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_watson import SpeechToTextV1, TextToSpeechV1
-from twiml import twiml_response
 from recording_manager import CallRecorder
 
 # Configurar logging
@@ -135,7 +134,7 @@ def convert_wav_to_mulaw_8k(wav_data):
 async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice", mark_name=None):
     """
     Convierte texto a audio y lo envía a Twilio con mark events para sincronización.
-    CORRECCIÓN PRINCIPAL: Usa mark events en lugar de sleep para evitar bloqueos.
+    CORRECCIÓN CLAVE: Usa eventos 'mark' en lugar de sleep para evitar bloqueos.
     """
     try:
         logger.info(f"📊 Generando audio para: '{text[:50]}...'")
@@ -176,12 +175,10 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice",
             })
             chunks_sent += 1
             
-            # Pequeña pausa cada 50 chunks para no saturar
             if chunks_sent % 50 == 0:
                 await asyncio.sleep(0.01)
         
         # CORRECCIÓN CRÍTICA: Enviar evento 'mark' al final del audio
-        # Esto le dice a Twilio que marque cuando el audio termine de reproducirse
         await ws.send_json({
             "event": "mark",
             "streamSid": stream_sid,
@@ -189,9 +186,6 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice",
         })
         
         logger.info(f"✅ Audio enviado ({chunks_sent} chunks) + mark '{mark_name}'")
-        
-        # NO usamos sleep aquí - la sincronización se maneja con el evento 'mark'
-        # que Twilio nos devolverá cuando el audio termine de reproducirse
         
         del mulaw_audio
         del audio_reply
@@ -296,24 +290,83 @@ async def keep_alive(ws):
         logger.error(f"❌ Error en keepalive: {e}")
 
 
+def generate_twiml(host: str) -> str:
+    """
+    Genera el TwiML response con la URL del WebSocket.
+    NOTA: No incluir <Record> cuando usas <Stream> - son mutuamente exclusivos.
+    """
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="wss://{host}/media-stream" />
+    </Connect>
+</Response>"""
+
+
+# ========================================
+# HTTP ENDPOINTS
+# ========================================
+
 @app.get("/")
 async def index():
-    return HTMLResponse("<h1>Twilio Media Streams + IBM Watson</h1>")
+    return HTMLResponse("""
+        <h1>🤖 Twilio Voice Bot</h1>
+        <p>WebSocket endpoint: <code>/media-stream</code></p>
+        <p>Status: ✅ Running</p>
+    """)
 
 
 @app.post("/twiml")
 async def handle_twiml(request: Request):
-    """Endpoint para TwiML"""
-    return twiml_response(request)
+    """Endpoint principal para TwiML"""
+    # Obtener el host del header o request
+    host = request.headers.get("host") or str(request.base_url).replace("http://", "").replace("https://", "").rstrip("/")
+    
+    logger.info(f"📞 Llamada entrante desde host: {host}")
+    
+    twiml = generate_twiml(host)
+    return Response(content=twiml, media_type="application/xml")
 
 
-@app.websocket("/stream")
-async def handle_stream(ws: WebSocket):
+@app.post("/incoming-call")
+async def incoming_call(request: Request):
+    """Alias para /twiml"""
+    return await handle_twiml(request)
+
+
+@app.post("/voice")
+async def voice(request: Request):
+    """Otro alias común para /twiml"""
+    return await handle_twiml(request)
+
+
+@app.post("/recording-status")
+async def recording_status(request: Request):
     """
-    CORRECCIÓN PRINCIPAL: Maneja eventos 'mark' de Twilio para sincronización adecuada
+    Endpoint para recibir callbacks de estado de grabación de Twilio.
+    NOTA: Este endpoint ya no es necesario porque manejamos grabación internamente,
+    pero lo mantenemos por compatibilidad.
+    """
+    form_data = await request.form()
+    logger.info(f"📝 Recording status callback: {dict(form_data)}")
+    return {"status": "received"}
+
+
+# ========================================
+# WEBSOCKET ENDPOINT
+# ========================================
+
+@app.websocket("/media-stream")
+async def handle_media_stream(ws: WebSocket):
+    """
+    WebSocket endpoint principal para Twilio Media Streams.
+    CORRECCIONES:
+    1. Usa eventos 'mark' para sincronización (no sleep)
+    2. Endpoint correcto: /media-stream
+    3. Manejo de grabación interno (no usa <Record> de Twilio)
     """
     await ws.accept()
-    logger.info("✅ WebSocket conectado")
+    logger.info("✅ WebSocket conectado en /media-stream")
     
     # Estado de la conversación
     stream_sid = None
@@ -327,7 +380,7 @@ async def handle_stream(ws: WebSocket):
     last_response_time = 0
     recorder = None
     
-    # NUEVO: Rastrear marks pendientes
+    # Rastrear marks pendientes (CORRECCIÓN CLAVE)
     pending_marks = set()
     current_mark = None
     
@@ -346,7 +399,7 @@ async def handle_stream(ws: WebSocket):
                 media_format = data["start"].get("mediaFormat", {})
                 logger.info(f"📋 Format: {json.dumps(media_format, indent=2)}")
                 
-                # Iniciar grabación
+                # 🎬 Iniciar grabación interna
                 try:
                     storage_type = os.getenv("RECORDING_STORAGE", "local")
                     recorder = CallRecorder(call_sid, storage_type=storage_type)
@@ -375,7 +428,7 @@ async def handle_stream(ws: WebSocket):
                     consecutive_silence_chunks = 0
                     has_speech = False
 
-            # NUEVO: Manejar evento 'mark' de Twilio
+            # CORRECCIÓN CLAVE: Manejar evento 'mark' de Twilio
             elif data["event"] == "mark":
                 mark_name = data["mark"]["name"]
                 logger.info(f"✅ Mark recibido: {mark_name}")
@@ -383,21 +436,21 @@ async def handle_stream(ws: WebSocket):
                 if mark_name in pending_marks:
                     pending_marks.remove(mark_name)
                 
-                # Si este era el mark actual y no hay más marks pendientes, podemos escuchar
+                # Si este era el mark actual y no hay más marks pendientes
                 if mark_name == current_mark and len(pending_marks) == 0:
                     is_speaking = False
                     current_mark = None
                     logger.info("👂 Listo para escuchar (mark confirmado)")
 
             elif data["event"] == "media":
-                # CORRECCIÓN: Solo ignorar audio si estamos hablando Y hay marks pendientes
+                # Solo ignorar audio si hay marks pendientes
                 if is_speaking and len(pending_marks) > 0:
                     continue
                 
                 audio_b64 = data["media"]["payload"]
                 audio_bytes = base64.b64decode(audio_b64)
                 
-                # Grabar cada chunk recibido
+                # 🎬 Grabar cada chunk
                 if recorder and recorder.is_recording:
                     try:
                         recorder.add_audio_chunk(audio_bytes)
@@ -406,10 +459,12 @@ async def handle_stream(ws: WebSocket):
                 
                 chunks_received += 1
                 
+                # Detectar silencio puro
                 if audio_bytes == b'\xff' * len(audio_bytes) or audio_bytes == b'\x00' * len(audio_bytes):
                     consecutive_silence_chunks += 1
                     continue
                 
+                # Protección contra buffer overflow
                 if len(audio_buffer) > MAX_BUFFER_SIZE:
                     logger.warning(f"⚠️ Buffer excedió {MAX_BUFFER_SIZE} bytes, reseteando")
                     audio_buffer = b""
@@ -418,6 +473,7 @@ async def handle_stream(ws: WebSocket):
                     has_speech = False
                     continue
                 
+                # Detección de silencio
                 if is_silence(audio_bytes):
                     consecutive_silence_chunks += 1
                 else:
@@ -434,11 +490,13 @@ async def handle_stream(ws: WebSocket):
                 
                 should_process = False
                 
+                # Condición 1: Buffer mínimo + habla + pausa detectada
                 if len(audio_buffer) >= MIN_BUFFER_SIZE and has_speech:
                     if consecutive_silence_chunks >= SILENCE_CHUNKS:
                         logger.info(f"✅ Pausa detectada ({consecutive_silence_chunks} chunks silencio)")
                         should_process = True
                 
+                # Condición 2: Buffer máximo alcanzado
                 elif len(audio_buffer) >= MAX_BUFFER_SIZE:
                     logger.info(f"✅ Buffer máximo alcanzado")
                     should_process = True
@@ -446,6 +504,7 @@ async def handle_stream(ws: WebSocket):
                 if not should_process:
                     continue
                 
+                # PROCESAR AUDIO
                 buffer_seconds = len(audio_buffer) / 8000
                 logger.info(f"🎤 Procesando {buffer_seconds:.1f}s de audio")
                 
@@ -457,12 +516,14 @@ async def handle_stream(ws: WebSocket):
                 has_speech = False
                 
                 try:
+                    # Validar que no sea silencio
                     unique_bytes = len(set(current_buffer))
                     if unique_bytes < 10:
                         logger.warning(f"⚠️ Solo {unique_bytes} valores únicos (silencio)")
                         is_speaking = False
                         continue
                     
+                    # Convertir audio
                     try:
                         pcm_audio = convert_mulaw_to_pcm_16k(current_buffer)
                     except ValueError as e:
@@ -476,6 +537,7 @@ async def handle_stream(ws: WebSocket):
                     
                     logger.info(f"📊 PCM: {len(pcm_audio)} bytes")
                     
+                    # Speech-to-Text
                     result = await recognize_with_timeout(pcm_audio, timeout=STT_TIMEOUT)
                     
                     del current_buffer
@@ -486,6 +548,7 @@ async def handle_stream(ws: WebSocket):
                         is_speaking = False
                         continue
                     
+                    # Extraer texto y confianza
                     text = ""
                     confidence = 0
                     if result.get("results") and len(result["results"]) > 0:
@@ -495,6 +558,7 @@ async def handle_stream(ws: WebSocket):
                             confidence = alternatives[0].get("confidence", 0)
                             logger.info(f"📝 '{text}' (conf: {confidence:.2f})")
                     
+                    # Validar texto
                     if not text or len(text) < 3 or confidence < 0.5:
                         logger.warning(f"⚠️ Rechazado: '{text}' (conf: {confidence:.2f})")
                         is_speaking = False
@@ -502,17 +566,19 @@ async def handle_stream(ws: WebSocket):
                     
                     logger.info(f"💬 User: {text}")
                     
+                    # Prevenir respuestas duplicadas
                     current_time = time.time()
                     if last_response_time > 0 and current_time - last_response_time < DUPLICATE_RESPONSE_THRESHOLD:
                         logger.info("⏭️ Ignorado (respuesta reciente)")
                         is_speaking = False
                         continue
                     
+                    # Obtener respuesta del agente
                     reply = await agent_reply_async(text, timeout=AGENT_TIMEOUT)
                     logger.info(f"🤖 Agent: {reply[:100]}...")
                     
                     try:
-                        # Enviar audio con mark
+                        # Enviar audio con mark (CORRECCIÓN CLAVE)
                         mark_name = await asyncio.wait_for(
                             send_audio_to_twilio(ws, stream_sid, reply),
                             timeout=TTS_TIMEOUT + 5
@@ -541,7 +607,7 @@ async def handle_stream(ws: WebSocket):
             elif data["event"] == "stop":
                 logger.info("🔴 Stream stopped")
                 
-                # Finalizar y subir grabación
+                # 🎬 Finalizar y subir grabación
                 if recorder and recorder.is_recording:
                     logger.info("💾 Finalizando grabación...")
                     try:
@@ -562,7 +628,7 @@ async def handle_stream(ws: WebSocket):
         import traceback
         traceback.print_exc()
     finally:
-        # Backup: Guardar grabación en caso de cierre inesperado
+        # 🎬 Backup: Guardar grabación en caso de cierre inesperado
         if recorder and recorder.is_recording:
             logger.info("💾 Guardando grabación por cierre inesperado...")
             try:
