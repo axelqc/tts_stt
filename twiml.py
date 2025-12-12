@@ -7,11 +7,4 @@ def twiml_response(host):
     <Connect>
         <Stream url="wss://{host}/media-stream" />
     </Connect>
-    <Record 
-        recordingStatusCallback="https://{host}/recording-status"
-        recordingStatusCallbackMethod="POST"
-        maxLength="3600"
-        playBeep="false"
-        transcribe="false"
-    />
 </Response>"""
