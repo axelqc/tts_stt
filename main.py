@@ -19,6 +19,8 @@ from agent import agent_reply
 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_watson import SpeechToTextV1, TextToSpeechV1
 from recording_manager import CallRecorder
+from pymongo import MongoClient
+from datetime import datetime
 
 # Configurar logging
 logging.basicConfig(
@@ -34,6 +36,9 @@ IBM_STT_APIKEY = os.getenv("IBM_STT_APIKEY")
 IBM_STT_URL = os.getenv("IBM_STT_URL")
 IBM_TTS_APIKEY = os.getenv("IBM_TTS_APIKEY")
 IBM_TTS_URL = os.getenv("IBM_TTS_URL")
+mongo_client = MongoClient(os.getenv("MONGODB_URI"))
+db = mongo_client[os.getenv("MONGODB_DATABASE")]
+calls_collection = db["calls"]
 
 # Timeouts optimizados
 STT_TIMEOUT = 8
@@ -360,10 +365,6 @@ async def recording_status(request: Request):
 async def handle_media_stream(ws: WebSocket):
     """
     WebSocket endpoint principal para Twilio Media Streams.
-    CORRECCIONES:
-    1. Usa eventos 'mark' para sincronización (no sleep)
-    2. Endpoint correcto: /media-stream
-    3. Manejo de grabación interno (no usa <Record> de Twilio)
     """
     await ws.accept()
     logger.info("✅ WebSocket conectado en /media-stream")
@@ -380,6 +381,10 @@ async def handle_media_stream(ws: WebSocket):
     last_response_time = 0
     recorder = None
     
+    # 💾 Estructura para acumular conversación
+    conversation_history = []
+    call_start_time = datetime.utcnow()
+    
     # Rastrear marks pendientes (CORRECCIÓN CLAVE)
     pending_marks = set()
     current_mark = None
@@ -393,6 +398,7 @@ async def handle_media_stream(ws: WebSocket):
             if data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
                 call_sid = data["start"].get("callSid", "unknown")
+                call_start_time = datetime.utcnow()
                 logger.info(f"📞 Stream iniciado: {stream_sid}")
                 logger.info(f"📞 Call SID: {call_sid}")
                 
@@ -417,6 +423,14 @@ async def handle_media_stream(ws: WebSocket):
                         mark_name = await send_greeting(ws, stream_sid)
                         pending_marks.add(mark_name)
                         current_mark = mark_name
+                        
+                        # 💾 Guardar saludo en historial
+                        conversation_history.append({
+                            "timestamp": datetime.utcnow(),
+                            "type": "greeting",
+                            "agent_message": "Saludo inicial enviado"
+                        })
+                        
                         logger.info(f"🎯 Esperando mark: {mark_name}")
                     except Exception as e:
                         logger.error(f"❌ Error saludo: {e}")
@@ -577,6 +591,15 @@ async def handle_media_stream(ws: WebSocket):
                     reply = await agent_reply_async(text, timeout=AGENT_TIMEOUT)
                     logger.info(f"🤖 Agent: {reply[:100]}...")
                     
+                    # 💾 Agregar al historial de conversación
+                    conversation_history.append({
+                        "timestamp": datetime.utcnow(),
+                        "user_message": text,
+                        "agent_response": reply,
+                        "confidence": confidence,
+                        "audio_duration": buffer_seconds
+                    })
+                    
                     try:
                         # Enviar audio con mark (CORRECCIÓN CLAVE)
                         mark_name = await asyncio.wait_for(
@@ -608,6 +631,7 @@ async def handle_media_stream(ws: WebSocket):
                 logger.info("🔴 Stream stopped")
                 
                 # 🎬 Finalizar y subir grabación
+                recording_url = None
                 if recorder and recorder.is_recording:
                     logger.info("💾 Finalizando grabación...")
                     try:
@@ -619,6 +643,28 @@ async def handle_media_stream(ws: WebSocket):
                     except Exception as e:
                         logger.error(f"❌ Error finalizando grabación: {e}")
                 
+                # 💾 Guardar toda la conversación en MongoDB
+                try:
+                    call_document = {
+                        "call_sid": call_sid,
+                        "stream_sid": stream_sid,
+                        "start_time": call_start_time,
+                        "end_time": datetime.utcnow(),
+                        "duration_seconds": (datetime.utcnow() - call_start_time).total_seconds(),
+                        "conversation": conversation_history,
+                        "recording_url": recording_url,
+                        "total_exchanges": len(conversation_history),
+                        "status": "completed"
+                    }
+                    
+                    result = await asyncio.to_thread(
+                        calls_collection.insert_one,
+                        call_document
+                    )
+                    logger.info(f"💾 ✅ Llamada completa guardada en MongoDB: {result.inserted_id}")
+                except Exception as e:
+                    logger.error(f"❌ Error guardando llamada en MongoDB: {e}")
+                
                 break
 
     except WebSocketDisconnect:
@@ -629,6 +675,7 @@ async def handle_media_stream(ws: WebSocket):
         traceback.print_exc()
     finally:
         # 🎬 Backup: Guardar grabación en caso de cierre inesperado
+        recording_url = None
         if recorder and recorder.is_recording:
             logger.info("💾 Guardando grabación por cierre inesperado...")
             try:
@@ -637,6 +684,29 @@ async def handle_media_stream(ws: WebSocket):
                     logger.info(f"🎬 ✅ Grabación guardada: {recording_url}")
             except Exception as e:
                 logger.error(f"❌ Error guardando grabación: {e}")
+        
+        # 💾 Guardar conversación aunque haya sido cierre inesperado
+        if conversation_history and call_sid:
+            try:
+                call_document = {
+                    "call_sid": call_sid,
+                    "stream_sid": stream_sid,
+                    "start_time": call_start_time,
+                    "end_time": datetime.utcnow(),
+                    "duration_seconds": (datetime.utcnow() - call_start_time).total_seconds(),
+                    "conversation": conversation_history,
+                    "recording_url": recording_url,
+                    "total_exchanges": len(conversation_history),
+                    "status": "interrupted"
+                }
+                
+                result = await asyncio.to_thread(
+                    calls_collection.insert_one,
+                    call_document
+                )
+                logger.info(f"💾 ✅ Conversación interrumpida guardada en MongoDB: {result.inserted_id}")
+            except Exception as e:
+                logger.error(f"❌ Error guardando conversación interrumpida: {e}")
         
         keep_alive_task.cancel()
         try:
