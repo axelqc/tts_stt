@@ -136,10 +136,11 @@ def convert_wav_to_mulaw_8k(wav_data):
         raise
 
 
-async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice", mark_name=None):
+async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice", mark_name=None, recorder=None):
     """
     Convierte texto a audio y lo envía a Twilio con mark events para sincronización.
     CORRECCIÓN CLAVE: Usa eventos 'mark' en lugar de sleep para evitar bloqueos.
+    También graba el audio del agente si se proporciona un recorder.
     """
     try:
         logger.info(f"📊 Generando audio para: '{text[:50]}...'")
@@ -156,10 +157,19 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice",
             ),
             timeout=TTS_TIMEOUT
         )
-
+        
         mulaw_audio = convert_wav_to_mulaw_8k(audio_reply)
         duration_seconds = len(mulaw_audio) / 8000
         logger.info(f"⏱️  Duración del audio: {duration_seconds:.1f}s")
+        
+        # 🎬 NUEVO: Grabar el audio del agente
+        if recorder and recorder.is_recording:
+            try:
+                # Grabar el audio mulaw completo
+                recorder.add_audio_chunk(mulaw_audio)
+                logger.info(f"🎬 Audio del agente grabado ({len(mulaw_audio)} bytes, {duration_seconds:.1f}s)")
+            except Exception as e:
+                logger.error(f"❌ Error grabando audio del agente: {e}")
         
         # Generar un mark único si no se proporcionó
         if mark_name is None:
@@ -205,11 +215,11 @@ async def send_audio_to_twilio(ws, stream_sid, text, voice="es-LA_SofiaV3Voice",
         raise
 
 
-async def send_greeting(ws, stream_sid):
+async def send_greeting(ws, stream_sid, recorder=None):
     """Envía saludo inicial"""
     greeting = "Hola, ¿en qué puedo ayudarte?"
     logger.info("🤖 Enviando saludo inicial...")
-    return await send_audio_to_twilio(ws, stream_sid, greeting, mark_name="greeting")
+    return await send_audio_to_twilio(ws, stream_sid, greeting, mark_name="greeting", recorder=recorder)
 
 
 async def recognize_with_timeout(pcm_audio, timeout=STT_TIMEOUT) -> Optional[dict]:
@@ -420,7 +430,7 @@ async def handle_media_stream(ws: WebSocket):
                     is_speaking = True
                     
                     try:
-                        mark_name = await send_greeting(ws, stream_sid)
+                        mark_name = await send_greeting(ws, stream_sid, recorder=recorder)
                         pending_marks.add(mark_name)
                         current_mark = mark_name
                         
@@ -601,9 +611,9 @@ async def handle_media_stream(ws: WebSocket):
                     })
                     
                     try:
-                        # Enviar audio con mark (CORRECCIÓN CLAVE)
+                        
                         mark_name = await asyncio.wait_for(
-                            send_audio_to_twilio(ws, stream_sid, reply),
+                            send_audio_to_twilio(ws, stream_sid, reply, recorder=recorder),
                             timeout=TTS_TIMEOUT + 5
                         )
                         
